@@ -15,6 +15,9 @@ import (
 
 // InitDatabase menginisialisasi koneksi PostgreSQL dan menjalankan AutoMigrate
 func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
+	// Auto create DB if not exists
+	_ = createDBIfNotExists(cfg)
+
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Jakarta",
 		cfg.DBHost, cfg.DBUser, cfg.DBPassword, cfg.DBName, cfg.DBPort)
 
@@ -56,4 +59,34 @@ func seedAdmin(db *gorm.DB) {
 		db.Create(&admin)
 		log.Println("Akun admin default berhasil dibuat (Username: admin, Password: admin123)")
 	}
+}
+
+func createDBIfNotExists(cfg *config.Config) error {
+	dsnRoot := fmt.Sprintf("host=%s user=%s password=%s dbname=postgres port=%s sslmode=disable TimeZone=Asia/Jakarta",
+		cfg.DBHost, cfg.DBUser, cfg.DBPassword, cfg.DBPort)
+
+	dbRoot, err := gorm.Open(postgres.Open(dsnRoot), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return err
+	}
+
+	sqlDB, err := dbRoot.DB()
+	if err == nil {
+		defer sqlDB.Close()
+	}
+
+	var exists bool
+	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = '%s')", cfg.DBName)
+	dbRoot.Raw(query).Scan(&exists)
+
+	if !exists {
+		log.Printf("Database '%s' belum ada di PostgreSQL, membuat database secara otomatis...\n", cfg.DBName)
+		execQuery := fmt.Sprintf("CREATE DATABASE \"%s\"", cfg.DBName)
+		if err := dbRoot.Exec(execQuery).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

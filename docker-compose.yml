@@ -17,15 +17,31 @@ services:
     environment:
       - REDIS_URL=redis:6379
       - DB_HOST=host.docker.internal
-      - DB_USER=postgres
-      - DB_PASSWORD=your_db_password
-      - DB_NAME=your_db_name
-      - DB_PORT=5432
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=${DB_PORT:-5432}
+      - WAHA_API_URL=http://waha:3000
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - redis
+      - waha
     tty: true
+
+  waha:
+    image: devlikeapro/waha
+    container_name: projek_bot_waha
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - WHATSAPP_DEFAULT_ENGINE=NOWEB
+      - WAHA_API_KEY=dhandi_waha_secret
+      - WHATSAPP_NOWEB_STORE_ENABLED=true
+      - WHATSAPP_NOWEB_STORE_FULL_SYNC=true
+      - WAHA_NOWEB_STORE_ENABLED=true
+      - WAHA_NOWEB_STORE_FULL_SYNC=true
 
   frontend:
     build: ../Bot_FE

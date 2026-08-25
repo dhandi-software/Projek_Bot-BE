@@ -1,25 +1,24 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"log"
-	"os"
-	"time"
 	
 	"bot_be/internal/config"
 	"bot_be/internal/handler"
 	"bot_be/internal/provider"
+	"bot_be/internal/service"
+	"bot_be/internal/wshub"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/websocket/v2"
 	"gorm.io/gorm"
-	"go.mau.fi/whatsmeow"
 )
 
 // StartWebServer menginisialisasi dan menjalankan server Fiber
-func StartWebServer(cfg *config.Config, db *gorm.DB, waClient *whatsmeow.Client, sheetsProvider *provider.SheetsProvider) {
+func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.SheetsProvider) {
 	app := fiber.New()
 
 	// Middleware
@@ -32,15 +31,45 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, waClient *whatsmeow.Client,
 	}))
 	app.Use(logger.New())
 
-	// Init Handlers
+	// Init Services & Handlers
+	botService := service.NewBotService(cfg, sheetsProvider, db)
+	messageHandler := handler.NewMessageHandler(botService)
 	authHandler := handler.NewAuthHandler(db)
 	configHandler := handler.NewConfigHandler(db, sheetsProvider)
 	activityHandler := handler.NewActivityHandler(db)
 
+	// Start WAHA Session automatically
+	provider.StartSession()
+
 	// Routes
 	api := app.Group("/api")
 	
+	// Middleware upgrade WebSocket
+	app.Use("/ws", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+
+	wshub.InitWSHub()
+
+	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
+		wshub.Hub.Register <- c
+		defer func() {
+			wshub.Hub.Unregister <- c
+		}()
+
+		// Keep connection alive and read messages if needed
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				break
+			}
+		}
+	}))
+
 	// API Auth
+	api.Post("/auth/login", authHandler.Login)
 	api.Post("/login", authHandler.Login)
 
 	// API Activities
@@ -50,37 +79,33 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, waClient *whatsmeow.Client,
 	api.Get("/config/spreadsheet", configHandler.GetSpreadsheetID)
 	api.Post("/config/spreadsheet", configHandler.SaveSpreadsheetID)
 
-	// API WhatsApp
+	// API WhatsApp WAHA endpoints
 	api.Get("/wa/qr", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
-			"qr": provider.WAQRString,
+			"qr": handler.FetchQR(),
 		})
 	})
 
 	api.Get("/wa/status", func(c *fiber.Ctx) error {
+		status, _ := provider.GetSessionStatus()
 		return c.JSON(fiber.Map{
-			"is_logged_in": waClient.IsLoggedIn(),
+			"is_logged_in": status == "WORKING",
 		})
 	})
 
 	api.Post("/wa/logout", func(c *fiber.Ctx) error {
-		if waClient.IsLoggedIn() {
-			waClient.Logout(context.Background())
-		} else {
-			waClient.Disconnect()
-		}
-		// Reset QR
-		provider.WAQRString = ""
-		
-		// Force restart to trigger new QR code generation
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			os.RemoveAll("data")
-			os.Exit(0)
-		}()
-		
+		provider.LogoutSession()
 		return c.JSON(fiber.Map{"message": "Berhasil logout WhatsApp"})
 	})
+
+	// Webhook from WAHA
+	api.Post("/wa/webhook", messageHandler.HandleWebhook)
+
+	// Add WhatsApp Chat API endpoints
+	chatHandler := handler.NewChatHandler()
+	api.Get("/chat/contacts", chatHandler.GetContacts)
+	api.Get("/chat/history/:jid", chatHandler.GetChatHistory)
+	api.Post("/chat/send", chatHandler.SendMessage)
 	
 	// Simple Health Check
 	api.Get("/health", func(c *fiber.Ctx) error {
@@ -94,3 +119,4 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, waClient *whatsmeow.Client,
 		log.Fatalf("Gagal menjalankan server: %v", err)
 	}
 }
+

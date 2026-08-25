@@ -1,4 +1,40 @@
+# Environment files & secrets
+.env
+.env.local
+.env.*.local
 credentials.json
 botwa-*-*.json
-data/
-.env
+*.pem
+*.key
+
+# Go binaries & build outputs
+/bot_app
+/*.exe
+/*.exe~
+/*.dll
+/*.so
+/*.dylib
+*.test
+*.out
+/bin/
+/dist/
+
+# Dependencies & Vendors
+/vendor/
+
+# Database & Docker storage
+/data/
+/postgres_data/
+/waha_data/
+/redis_data/
+
+# Log files
+*.log
+
+# IDE & OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

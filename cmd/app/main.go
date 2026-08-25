@@ -8,10 +8,8 @@ import (
 	"syscall"
 
 	"bot_be/internal/config"
-	"bot_be/internal/handler"
 	"bot_be/internal/provider"
 	"bot_be/internal/server"
-	"bot_be/internal/service"
 )
 
 func main() {
@@ -39,26 +37,19 @@ func main() {
 		log.Println("WARNING: File 'credentials.json' tidak ditemukan. Bot akan berjalan tanpa fitur Google Sheets.")
 	}
 
-	// 5. Init Service & Handler
-	botService := service.NewBotService(cfg, sheetsProvider, db)
-	messageHandler := handler.NewMessageHandler(botService)
+	// 5. Init Service (Handlers are now initialized inside server)
+	// botService := service.NewBotService(cfg, sheetsProvider, db) is initialized in server.go so we don't need to do it here unless we need it
 
-	// 6. Init WhatsApp Client
-	client, err := provider.InitWhatsApp(messageHandler.EventHandler)
-	if err != nil {
-		log.Fatalf("Gagal inisialisasi WhatsApp: %v", err)
-	}
 
-	// 7. Jalankan Web Server di Goroutine terpisah agar tidak memblokir WhatsApp
+	// 6. Jalankan Web Server di Goroutine terpisah
 	go func() {
-		server.StartWebServer(cfg, db, client, sheetsProvider)
+		server.StartWebServer(cfg, db, sheetsProvider)
 	}()
 
-	// 8. Listen to OS signals to gracefully stop the bot
+	// 7. Listen to OS signals to gracefully stop the bot
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
 
 	log.Println("Mematikan bot...")
-	client.Disconnect()
 }
