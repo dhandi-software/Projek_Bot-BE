@@ -1,52 +1,69 @@
-# 🤖 Backend - Projek Bot WhatsApp
+# 🤖 Backend Microservice - Projek Bot & E-Commerce
 
-Ini adalah bagian inti server (Backend) untuk Bot WhatsApp. Aplikasi ini bertugas mengelola koneksi WhatsApp (menggunakan pustaka `whatsmeow`), menyediakan REST API untuk antarmuka pengguna (Frontend), serta mengatur integrasi lain seperti sinkronisasi dengan Google Sheets.
+Layanan Backend microservice ini dibangun menggunakan **Golang** dan framework **Fiber v2**. Service ini bertanggung jawab menangani logika bisnis e-commerce (seperti **Debounced Product Search API**), integrasi WhatsApp Webhook via WAHA / Whatsmeow, autentikasi, serta komunikasi data ke PostgreSQL dan Google Sheets.
 
-## 🚀 Getting Started
+---
 
-### 📋 Prasyarat
+## 🏗️ Peran Microservice dalam Sistem
 
-Pastikan Anda sudah menginstal:
-- [Go (Golang)](https://go.dev/dl/) versi 1.19 atau lebih baru.
-- (Opsional) Docker & Docker Compose jika ingin menjalankan menggunakan kontainer.
+Microservice ini berperan sebagai API Gateway dan Core Engine:
+- 🔍 **Debounced Product Search API**: Layanan REST API terpisah (`GET /api/products/search?q=...`) untuk melayani pencarian produk secara cepat dan efisien.
+- 💬 **WhatsApp Engine Gateway**: Mengelola koneksi sesi WhatsApp, pengiriman pesan, penerimaan webhook real-time, dan penyimpanan riwayat obrolan.
+- 📊 **Spreadsheet & Data Provider**: Mengelola konfigurasi ID Google Sheets dan aktivitas audit log.
 
-### 📦 Konfigurasi `.env`
-
-1. Salin file `.env.example` menjadi `.env`.
-2. Sesuaikan kredensial di dalamnya:
-   ```bash
-   cp .env.example .env
-   ```
-
-### 🧪 Run the App (Lokal)
-
-Jalankan perintah berikut untuk mengunduh *dependencies* dan menjalankan server:
-
-```bash
-go mod tidy
-go run cmd/app/main.go
-```
-Server akan berjalan di port `8080`.
-
-### 🐳 Run dengan Docker Compose
-
-Jika Anda ingin menjalankan Backend, Frontend, dan Redis secara bersamaan:
-
-```bash
-docker-compose up -d --build
-```
+---
 
 ## 🌐 Tech Stack
 
-- 🐹 **Golang** - Bahasa pemrograman utama.
-- 🚀 **Fiber (v2)** - Framework web yang sangat cepat untuk Golang.
-- 💬 **Whatsmeow** - Library utama untuk menghubungkan bot ke server WhatsApp.
-- 🗄️ **GORM & PostgreSQL** - ORM dan Database yang digunakan.
-- 📝 **Google Sheets API** - Untuk integrasi data ke Spreadsheet.
-- 🐋 **Docker** - Manajemen kontainer.
+- 🐹 **Golang 1.22+** - Bahasa pemrograman backend performa tinggi.
+- 🚀 **Fiber (v2)** - Framework HTTP server tercepat di ekosistem Go.
+- 🗄️ **GORM & PostgreSQL** - Database relational dan ORM.
+- 💬 **WAHA / Whatsmeow** - Library & engine integrasi WhatsApp.
+- 🐳 **Docker & Docker Compose** - Kontainerisasi microservices.
 
-## 📂 Struktur Folder Utama
+---
 
-- `cmd/app/` - Titik masuk (*entry point*) aplikasi (`main.go`).
-- `internal/` - Berisi logika inti aplikasi yang tidak diekspos keluar (handler, model, config, provider).
-- `data/` - Folder tempat menyimpan sesi lokal WhatsApp (`wa_session.db`).
+## 📡 API Endpoints
+
+### 🔍 Product Search Service
+- `GET /api/products/search?q={query}`
+  - Request: `http://localhost:8080/api/products/search?q=macbook`
+  - Response:
+    ```json
+    {
+      "query": "macbook",
+      "total": 1,
+      "results": [
+        {
+          "id": "1",
+          "title": "MacBook Pro M3 Max 16-inch",
+          "category": "Computer & Laptop",
+          "price": "$2,499",
+          "brand": "Apple",
+          "image": "https://..."
+        }
+      ]
+    }
+    ```
+
+### 💬 WhatsApp Service
+- `GET /api/wa/qr` - Mengambil QR code login WhatsApp.
+- `GET /api/wa/status` - Mengecek status sesi WA.
+- `POST /api/chat/send` - Mengirim pesan WhatsApp.
+- `POST /api/wa/webhook` - Endpoint penampung event webhook pesan masuk dari WAHA.
+
+---
+
+## 🧪 Cara Menjalankan
+
+### Manual:
+```bash
+cp .env.example .env
+go mod tidy
+go run cmd/app/main.go
+```
+
+### Docker Compose:
+```bash
+docker-compose up -d --build
+```

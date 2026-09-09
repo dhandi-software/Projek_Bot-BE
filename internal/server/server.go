@@ -106,6 +106,10 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Get("/chat/contacts", chatHandler.GetContacts)
 	api.Get("/chat/history/:jid", chatHandler.GetChatHistory)
 	api.Post("/chat/send", chatHandler.SendMessage)
+
+	// API Products Search (Debounced Search)
+	productHandler := handler.NewProductHandler()
+	api.Get("/products/search", productHandler.SearchProducts)
 	
 	// Simple Health Check
 	api.Get("/health", func(c *fiber.Ctx) error {
