@@ -23,10 +23,15 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 
 	// Middleware
 	app.Use(cors.New(cors.Config{
+		AllowOrigins: cfg.CORSAllowedOrigins,
 		AllowOriginsFunc: func(origin string) bool {
-			return true // Mengizinkan origin apapun secara dinamis
+			if cfg.CORSAllowedOrigins == "*" || cfg.CORSAllowedOrigins == "" {
+				return true
+			}
+			return false
 		},
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Requested-With",
+		AllowMethods:     "GET, POST, HEAD, PUT, DELETE, PATCH, OPTIONS",
 		AllowCredentials: true,
 	}))
 	app.Use(logger.New())
@@ -37,6 +42,7 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	authHandler := handler.NewAuthHandler(db)
 	configHandler := handler.NewConfigHandler(db, sheetsProvider)
 	activityHandler := handler.NewActivityHandler(db)
+	customerHandler := handler.NewCustomerHandler(db)
 
 	// Start WAHA Session automatically
 	provider.StartSession()
@@ -68,9 +74,19 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 		}
 	}))
 
-	// API Auth
+	// API Auth (Admin & Customer)
 	api.Post("/auth/login", authHandler.Login)
 	api.Post("/login", authHandler.Login)
+	api.Post("/auth/check-email", authHandler.CheckEmail)
+	api.Post("/auth/reset-password", authHandler.ResetPassword)
+	api.Post("/auth/change-password", authHandler.ChangePassword)
+	api.Post("/customer/register", customerHandler.RegisterCustomer)
+	api.Post("/customer/login", customerHandler.LoginCustomer)
+	api.Get("/customer/profile", customerHandler.GetCustomerProfile)
+	api.Put("/customer/profile", customerHandler.UpdateCustomerProfile)
+	api.Post("/customer/profile", customerHandler.UpdateCustomerProfile)
+	api.Get("/admin/customers", customerHandler.GetAdminCustomers)
+	api.Get("/admin/dashboard/stats", customerHandler.GetDashboardStats)
 
 	// API Activities
 	api.Get("/activities", activityHandler.GetActivities)
@@ -107,9 +123,22 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Get("/chat/history/:jid", chatHandler.GetChatHistory)
 	api.Post("/chat/send", chatHandler.SendMessage)
 
-	// API Products Search (Debounced Search)
-	productHandler := handler.NewProductHandler()
+	// API Products CRUD
+	productHandler := handler.NewProductHandler(db)
+	api.Get("/products", productHandler.GetProducts)
 	api.Get("/products/search", productHandler.SearchProducts)
+	api.Get("/products/:id", productHandler.GetProductByID)
+	api.Post("/products", productHandler.CreateProduct)
+	api.Post("/products/bulk", productHandler.BulkCreateProducts)
+	api.Put("/products/:id", productHandler.UpdateProduct)
+	api.Delete("/products/:id", productHandler.DeleteProduct)
+
+	// API Banners CRUD
+	bannerHandler := handler.NewBannerHandler(db)
+	api.Get("/banners", bannerHandler.GetBanners)
+	api.Post("/banners", bannerHandler.CreateBanner)
+	api.Put("/banners/:id", bannerHandler.UpdateBanner)
+	api.Delete("/banners/:id", bannerHandler.DeleteBanner)
 	
 	// Simple Health Check
 	api.Get("/health", func(c *fiber.Ctx) error {
@@ -117,7 +146,7 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	})
 
 	fmt.Printf("\n🚀 Berhasil! Aplikasi Backend berjalan di: http://localhost:%s\n", cfg.Port)
-	fmt.Printf("🌐 Silakan buka Frontend di: http://localhost:3000\n\n")
+	fmt.Printf("🌐 Silakan buka Frontend di: %s\n\n", cfg.ClientURL)
 	
 	if err := app.Listen(":" + cfg.Port); err != nil {
 		log.Fatalf("Gagal menjalankan server: %v", err)

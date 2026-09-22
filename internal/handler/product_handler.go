@@ -1,133 +1,167 @@
 package handler
 
 import (
-	"strings"
+	"strconv"
+
+	"bot_be/internal/model"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
-type ProductItem struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Category string `json:"category"`
-	Price    string `json:"price"`
-	Brand    string `json:"brand"`
-	Image    string `json:"image"`
+type ProductHandler struct {
+	db *gorm.DB
 }
 
-var sampleProducts = []ProductItem{
-	{
-		ID:       "1",
-		Title:    "MacBook Pro M3 Max 16-inch",
-		Category: "Computer & Laptop",
-		Price:    "$2,499",
-		Brand:    "Apple",
-		Image:    "https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "2",
-		Title:    "Dell XPS 15 OLED Touch Laptop",
-		Category: "Computer & Laptop",
-		Price:    "$1,899",
-		Brand:    "Dell",
-		Image:    "https://images.unsplash.com/photo-1593642632823-8f785ba67e45?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "3",
-		Title:    "Sony WH-1000XM5 Wireless Headphones",
-		Category: "Headphone",
-		Price:    "$399",
-		Brand:    "Sony",
-		Image:    "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "4",
-		Title:    "Samsung Galaxy S24 Ultra 512GB",
-		Category: "Smartphone",
-		Price:    "$1,299",
-		Brand:    "Samsung",
-		Image:    "https://images.unsplash.com/photo-1610945265064-0e34e5519bbf?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "5",
-		Title:    "LG UltraGear 32-inch Gaming Monitor",
-		Category: "Computer Accessories",
-		Price:    "$699",
-		Brand:    "LG",
-		Image:    "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "6",
-		Title:    "Google Pixel 8 Pro AI Smartphone",
-		Category: "Smartphone",
-		Price:    "$999",
-		Brand:    "Google",
-		Image:    "https://images.unsplash.com/photo-1598327105666-5b89351aff97?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "7",
-		Title:    "Logitech MX Master 3S Wireless Mouse",
-		Category: "Computer Accessories",
-		Price:    "$99",
-		Brand:    "Logitech",
-		Image:    "https://images.unsplash.com/photo-1615663245857-ac93bb7c39e7?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "8",
-		Title:    "Keychron K2 Mechanical Keyboard RGB",
-		Category: "Computer Accessories",
-		Price:    "$89",
-		Brand:    "Keychron",
-		Image:    "https://images.unsplash.com/photo-1587829741301-dc798b83add3?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "9",
-		Title:    "Asus ROG Strix Gaming Laptop 17-inch",
-		Category: "Computer & Laptop",
-		Price:    "$2,199",
-		Brand:    "Asus",
-		Image:    "https://images.unsplash.com/photo-1603302576837-37561b2e2302?auto=format&fit=crop&w=300&q=80",
-	},
-	{
-		ID:       "10",
-		Title:    "Apple Airpods Pro 2nd Gen Wireless",
-		Category: "Headphone",
-		Price:    "$249",
-		Brand:    "Apple",
-		Image:    "https://images.unsplash.com/photo-1600294037681-c80b4cb5b434?auto=format&fit=crop&w=300&q=80",
-	},
+func NewProductHandler(db *gorm.DB) *ProductHandler {
+	return &ProductHandler{db: db}
 }
 
-type ProductHandler struct{}
+func (h *ProductHandler) GetProducts(c *fiber.Ctx) error {
+	var products []model.Product
 
-func NewProductHandler() *ProductHandler {
-	return &ProductHandler{}
-}
+	query := h.db.Model(&model.Product{})
 
-// SearchProducts handles GET /api/products/search?q=...
-func (h *ProductHandler) SearchProducts(c *fiber.Ctx) error {
-	query := strings.TrimSpace(strings.ToLower(c.Query("q")))
-
-	if query == "" {
-		return c.JSON(fiber.Map{
-			"query":   "",
-			"total":   0,
-			"results": []ProductItem{},
-		})
+	if cat := c.Query("category"); cat != "" {
+		query = query.Where("LOWER(category) = LOWER(?)", cat)
+	}
+	if search := c.Query("q"); search != "" {
+		searchTerm := "%" + search + "%"
+		query = query.Where("LOWER(title) LIKE LOWER(?) OR LOWER(sku) LIKE LOWER(?) OR LOWER(brand) LIKE LOWER(?) OR LOWER(materials) LIKE LOWER(?)", searchTerm, searchTerm, searchTerm, searchTerm)
+	}
+	if featured := c.Query("featured"); featured == "true" {
+		query = query.Where("is_featured = ?", true)
+	}
+	if activeOnly := c.Query("active"); activeOnly == "true" {
+		query = query.Where("is_active = ?", true)
 	}
 
-	var results []ProductItem
-	for _, p := range sampleProducts {
-		if strings.Contains(strings.ToLower(p.Title), query) ||
-			strings.Contains(strings.ToLower(p.Category), query) ||
-			strings.Contains(strings.ToLower(p.Brand), query) {
-			results = append(results, p)
-		}
+	if err := query.Order("id desc").Find(&products).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal mengambil data produk"})
 	}
 
 	return c.JSON(fiber.Map{
-		"query":   query,
-		"total":   len(results),
-		"results": results,
+		"total": len(products),
+		"data":  products,
 	})
+}
+
+func (h *ProductHandler) GetProductByID(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var product model.Product
+
+	if err := h.db.First(&product, id).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
+	}
+
+	return c.JSON(product)
+}
+
+func (h *ProductHandler) CreateProduct(c *fiber.Ctx) error {
+	var product model.Product
+	if err := c.BodyParser(&product); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Format request tidak valid"})
+	}
+
+	if product.Title == "" || product.Category == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Nama produk dan kategori wajib diisi"})
+	}
+
+	if product.SKU == "" {
+		product.SKU = "PROD-" + strconv.FormatInt(c.Context().Time().UnixNano(), 36)
+	}
+
+	if err := h.db.Create(&product).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal menyimpan produk: " + err.Error()})
+	}
+
+	return c.Status(201).JSON(fiber.Map{
+		"message": "Produk berhasil ditambahkan",
+		"data":    product,
+	})
+}
+
+func (h *ProductHandler) UpdateProduct(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var product model.Product
+
+	if err := h.db.First(&product, id).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
+	}
+
+	var payload model.Product
+	if err := c.BodyParser(&payload); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Format data tidak valid"})
+	}
+
+	product.Title = payload.Title
+	product.Category = payload.Category
+	product.Price = payload.Price
+	product.Stock = payload.Stock
+	product.Materials = payload.Materials
+	product.Brand = payload.Brand
+	product.Description = payload.Description
+	product.Image = payload.Image
+	product.IsFeatured = payload.IsFeatured
+	product.IsActive = payload.IsActive
+	if payload.SKU != "" {
+		product.SKU = payload.SKU
+	}
+
+	if err := h.db.Save(&product).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal memperbarui produk"})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "Produk berhasil diperbarui",
+		"data":    product,
+	})
+}
+
+func (h *ProductHandler) DeleteProduct(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if err := h.db.Delete(&model.Product{}, id).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal menghapus produk"})
+	}
+
+	return c.JSON(fiber.Map{"message": "Produk berhasil dihapus"})
+}
+
+func (h *ProductHandler) BulkCreateProducts(c *fiber.Ctx) error {
+	var products []model.Product
+	if err := c.BodyParser(&products); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Format data import tidak valid"})
+	}
+
+	if len(products) == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "Data produk kosong"})
+	}
+
+	now := c.Context().Time().UnixNano()
+	for i := range products {
+		if products[i].Title == "" {
+			continue
+		}
+		if products[i].Category == "" {
+			products[i].Category = "Umum"
+		}
+		if products[i].SKU == "" {
+			products[i].SKU = "IMP-" + strconv.FormatInt(now+int64(i), 36)
+		}
+		products[i].IsActive = true
+	}
+
+	if err := h.db.Create(&products).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal melakukan import produk: " + err.Error()})
+	}
+
+	return c.Status(201).JSON(fiber.Map{
+		"message": "Import produk berhasil",
+		"total":   len(products),
+		"data":    products,
+	})
+}
+
+func (h *ProductHandler) SearchProducts(c *fiber.Ctx) error {
+	return h.GetProducts(c)
 }
