@@ -1,11 +1,16 @@
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"bot_be/internal/model"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -17,12 +22,70 @@ func NewProductHandler(db *gorm.DB) *ProductHandler {
 	return &ProductHandler{db: db}
 }
 
+func stringifyFlexJSON(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	bytes, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(bytes)
+}
+
+
+func parseFlexFloat(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch val := v.(type) {
+	case float64:
+		return val
+	case float32:
+		return float64(val)
+	case int:
+		return float64(val)
+	case int64:
+		return float64(val)
+	case string:
+		cleaned := strings.TrimSpace(val)
+		cleaned = strings.ReplaceAll(cleaned, "Rp", "")
+		cleaned = strings.ReplaceAll(cleaned, ".", "")
+		cleaned = strings.ReplaceAll(cleaned, ",", ".")
+		f, _ := strconv.ParseFloat(cleaned, 64)
+		return f
+	}
+	return 0
+}
+
+func parseFlexInt(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case string:
+		cleaned := strings.TrimSpace(val)
+		i, _ := strconv.Atoi(cleaned)
+		return i
+	}
+	return 0
+}
+
 func (h *ProductHandler) GetProducts(c *fiber.Ctx) error {
 	var products []model.Product
 
 	query := h.db.Model(&model.Product{})
 
-	if cat := c.Query("category"); cat != "" {
+	if cat := c.Query("category"); cat != "" && cat != "ALL" {
 		query = query.Where("LOWER(category) = LOWER(?)", cat)
 	}
 	if search := c.Query("q"); search != "" {
@@ -34,6 +97,12 @@ func (h *ProductHandler) GetProducts(c *fiber.Ctx) error {
 	}
 	if activeOnly := c.Query("active"); activeOnly == "true" {
 		query = query.Where("is_active = ?", true)
+	}
+	if status := c.Query("status"); status != "" {
+		query = query.Where("LOWER(status) = LOWER(?)", status)
+	}
+	if bestDeals := c.Query("best_deals"); bestDeals == "true" {
+		query = query.Where("is_best_deal = ? AND best_deal_expires_at IS NOT NULL AND best_deal_expires_at > ?", true, c.Context().Time())
 	}
 
 	if err := query.Order("id desc").Find(&products).Error; err != nil {
@@ -47,28 +116,125 @@ func (h *ProductHandler) GetProducts(c *fiber.Ctx) error {
 }
 
 func (h *ProductHandler) GetProductByID(c *fiber.Ctx) error {
-	id := c.Params("id")
+	param := c.Params("id")
 	var product model.Product
 
-	if err := h.db.First(&product, id).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
+	if num, err := strconv.ParseUint(param, 10, 64); err == nil {
+		if err := h.db.Where("id = ? OR LOWER(sku) = LOWER(?)", num, param).First(&product).Error; err == nil {
+			return c.JSON(product)
+		}
+	} else {
+		if err := h.db.Where("LOWER(sku) = LOWER(?)", param).First(&product).Error; err == nil {
+			return c.JSON(product)
+		}
 	}
 
-	return c.JSON(product)
+	return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
 }
 
 func (h *ProductHandler) CreateProduct(c *fiber.Ctx) error {
-	var product model.Product
-	if err := c.BodyParser(&product); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Format request tidak valid"})
+	var body map[string]interface{}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Format request tidak valid: " + err.Error()})
 	}
 
-	if product.Title == "" || product.Category == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "Nama produk dan kategori wajib diisi"})
+	title, _ := body["title"].(string)
+	if title == "" {
+		if nameVal, ok := body["name"].(string); ok {
+			title = nameVal
+		}
 	}
 
-	if product.SKU == "" {
-		product.SKU = "PROD-" + strconv.FormatInt(c.Context().Time().UnixNano(), 36)
+	category, _ := body["category"].(string)
+	if title == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Nama produk wajib diisi"})
+	}
+	if category == "" {
+		category = "Umum"
+	}
+
+	sku, _ := body["sku"].(string)
+	if sku == "" {
+		sku = fmt.Sprintf("SKU-%s", strings.ToUpper(uuid.New().String()[:8]))
+	}
+
+	brand, _ := body["brand"].(string)
+	materials, _ := body["materials"].(string)
+	shortDesc, _ := body["short_description"].(string)
+	desc, _ := body["description"].(string)
+	image, _ := body["image"].(string)
+	status, _ := body["status"].(string)
+
+	if status == "" {
+		status = "active"
+	}
+
+	price := parseFlexFloat(body["price"])
+	discountPrice := parseFlexFloat(body["discount_price"])
+	stock := parseFlexInt(body["stock"])
+	lowStockThreshold := parseFlexInt(body["low_stock_threshold"])
+	if lowStockThreshold == 0 && body["low_stock_threshold"] == nil {
+		lowStockThreshold = 10
+	}
+	weight := parseFlexFloat(body["weight"])
+
+	isFeatured, _ := body["is_featured"].(bool)
+	isActive := true
+	if val, ok := body["is_active"].(bool); ok {
+		isActive = val
+	} else if strings.ToLower(status) == "draft" || strings.ToLower(status) == "archived" {
+		isActive = false
+	}
+
+	isBestDeal, _ := body["is_best_deal"].(bool)
+	var bestDealStartedAt *time.Time
+	var bestDealExpiresAt *time.Time
+
+	if isBestDeal {
+		now := c.Context().Time()
+		durationHours := parseFlexInt(body["best_deal_duration"])
+		if durationHours <= 0 {
+			durationHours = parseFlexInt(body["best_deal_duration_hours"])
+		}
+		if durationHours <= 0 {
+			durationHours = 6
+		}
+		expires := now.Add(time.Duration(durationHours) * time.Hour)
+		bestDealStartedAt = &now
+		bestDealExpiresAt = &expires
+	}
+
+	featuresStr := stringifyFlexJSON(body["features"])
+	colorsStr := stringifyFlexJSON(body["colors"])
+	shippingInfoStr := stringifyFlexJSON(body["shipping_info"])
+	additionalInfoStr := stringifyFlexJSON(body["additional_info"])
+	specificationsStr := stringifyFlexJSON(body["specifications"])
+
+	product := model.Product{
+		SKU:               sku,
+		Title:             title,
+		Category:          category,
+		Price:             price,
+		DiscountPrice:     discountPrice,
+		Stock:             stock,
+		LowStockThreshold: lowStockThreshold,
+		Weight:            weight,
+		Materials:         materials,
+		Brand:             brand,
+		ShortDescription:  shortDesc,
+		Description:       desc,
+		Image:             image,
+		Status:            status,
+		IsFeatured:        isFeatured,
+		IsActive:          isActive,
+		IsBestDeal:        isBestDeal,
+		BestDealStartedAt: bestDealStartedAt,
+		BestDealExpiresAt: bestDealExpiresAt,
+		Features:          featuresStr,
+		Colors:            colorsStr,
+		ShippingInfo:      shippingInfoStr,
+		AdditionalInfo:    additionalInfoStr,
+		Specifications:    specificationsStr,
 	}
 
 	if err := h.db.Create(&product).Error; err != nil {
@@ -89,39 +255,128 @@ func (h *ProductHandler) UpdateProduct(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
 	}
 
-	var payload model.Product
-	if err := c.BodyParser(&payload); err != nil {
+	var body map[string]interface{}
+	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Format data tidak valid"})
 	}
 
-	product.Title = payload.Title
-	product.Category = payload.Category
-	product.Price = payload.Price
-	product.Stock = payload.Stock
-	product.Materials = payload.Materials
-	product.Brand = payload.Brand
-	product.Description = payload.Description
-	product.Image = payload.Image
-	product.IsFeatured = payload.IsFeatured
-	product.IsActive = payload.IsActive
-	if payload.SKU != "" {
-		product.SKU = payload.SKU
+	if title, ok := body["title"].(string); ok && title != "" {
+		product.Title = title
+	} else if nameVal, ok := body["name"].(string); ok && nameVal != "" {
+		product.Title = nameVal
 	}
 
-	if err := h.db.Save(&product).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Gagal memperbarui produk"})
+	if cat, ok := body["category"].(string); ok && cat != "" {
+		product.Category = cat
+	}
+
+	if sku, ok := body["sku"].(string); ok && sku != "" {
+		product.SKU = sku
+	}
+
+	if brand, ok := body["brand"].(string); ok {
+		product.Brand = brand
+	}
+	if mat, ok := body["materials"].(string); ok {
+		product.Materials = mat
+	}
+	if sDesc, ok := body["short_description"].(string); ok {
+		product.ShortDescription = sDesc
+	}
+	if desc, ok := body["description"].(string); ok {
+		product.Description = desc
+	}
+	if img, ok := body["image"].(string); ok {
+		product.Image = img
+	}
+	if st, ok := body["status"].(string); ok && st != "" {
+		product.Status = st
+		if strings.ToLower(st) == "draft" || strings.ToLower(st) == "archived" {
+			product.IsActive = false
+		} else if strings.ToLower(st) == "active" {
+			product.IsActive = true
+		}
+	}
+
+	if val, ok := body["price"]; ok {
+		product.Price = parseFlexFloat(val)
+	}
+	if val, ok := body["discount_price"]; ok {
+		product.DiscountPrice = parseFlexFloat(val)
+	}
+	if val, ok := body["stock"]; ok {
+		product.Stock = parseFlexInt(val)
+	}
+	if val, ok := body["low_stock_threshold"]; ok {
+		product.LowStockThreshold = parseFlexInt(val)
+	}
+	if val, ok := body["weight"]; ok {
+		product.Weight = parseFlexFloat(val)
+	}
+	if val, ok := body["is_featured"].(bool); ok {
+		product.IsFeatured = val
+	}
+	if val, ok := body["is_active"].(bool); ok {
+		product.IsActive = val
+	}
+
+	if val, ok := body["features"]; ok {
+		product.Features = stringifyFlexJSON(val)
+	}
+	if val, ok := body["colors"]; ok {
+		product.Colors = stringifyFlexJSON(val)
+	}
+	if val, ok := body["shipping_info"]; ok {
+		product.ShippingInfo = stringifyFlexJSON(val)
+	}
+	if val, ok := body["additional_info"]; ok {
+		product.AdditionalInfo = stringifyFlexJSON(val)
+	}
+	if val, ok := body["specifications"]; ok {
+		product.Specifications = stringifyFlexJSON(val)
+	}
+
+	if isBD, ok := body["is_best_deal"].(bool); ok {
+		product.IsBestDeal = isBD
+		if isBD {
+			now := c.Context().Time()
+			durationHours := parseFlexInt(body["best_deal_duration"])
+			if durationHours <= 0 {
+				durationHours = parseFlexInt(body["best_deal_duration_hours"])
+			}
+			if durationHours <= 0 {
+				durationHours = 6
+			}
+			expires := now.Add(time.Duration(durationHours) * time.Hour)
+			product.BestDealStartedAt = &now
+			product.BestDealExpiresAt = &expires
+		} else {
+			product.BestDealStartedAt = nil
+			product.BestDealExpiresAt = nil
+		}
+	} else if durationVal := parseFlexInt(body["best_deal_duration"]); durationVal > 0 {
+		product.IsBestDeal = true
+		now := c.Context().Time()
+		expires := now.Add(time.Duration(durationVal) * time.Hour)
+		product.BestDealStartedAt = &now
+		product.BestDealExpiresAt = &expires
+	}
+
+	if err := h.db.Select("*").Save(&product).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal memperbarui produk: " + err.Error()})
 	}
 
 	return c.JSON(fiber.Map{
 		"message": "Produk berhasil diperbarui",
 		"data":    product,
 	})
+
 }
 
 func (h *ProductHandler) DeleteProduct(c *fiber.Ctx) error {
 	id := c.Params("id")
 	if err := h.db.Delete(&model.Product{}, id).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Gagal menghapus produk"})
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal menghapus produk: " + err.Error()})
 	}
 
 	return c.JSON(fiber.Map{"message": "Produk berhasil dihapus"})
@@ -146,7 +401,10 @@ func (h *ProductHandler) BulkCreateProducts(c *fiber.Ctx) error {
 			products[i].Category = "Umum"
 		}
 		if products[i].SKU == "" {
-			products[i].SKU = "IMP-" + strconv.FormatInt(now+int64(i), 36)
+			products[i].SKU = fmt.Sprintf("IMP-%d-%d", now, i)
+		}
+		if products[i].Status == "" {
+			products[i].Status = "active"
 		}
 		products[i].IsActive = true
 	}

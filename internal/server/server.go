@@ -133,6 +133,13 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Put("/products/:id", productHandler.UpdateProduct)
 	api.Delete("/products/:id", productHandler.DeleteProduct)
 
+	// API Categories CRUD
+	categoryHandler := handler.NewCategoryHandler(db)
+	api.Get("/categories", categoryHandler.GetCategories)
+	api.Post("/categories", categoryHandler.CreateCategory)
+	api.Put("/categories/:id", categoryHandler.UpdateCategory)
+	api.Delete("/categories/:id", categoryHandler.DeleteCategory)
+
 	// API Banners CRUD
 	bannerHandler := handler.NewBannerHandler(db)
 	api.Get("/banners", bannerHandler.GetBanners)
