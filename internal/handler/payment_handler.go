@@ -102,3 +102,24 @@ func (h *PaymentHandler) GetOrderByID(c *fiber.Ctx) error {
 		"data": order,
 	})
 }
+
+func (h *PaymentHandler) GetOrderInvoice(c *fiber.Ctx) error {
+	orderID := c.Params("id")
+	if orderID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Order ID wajib diisi",
+		})
+	}
+
+	pdfBytes, err := h.paymentService.GenerateInvoicePDF(orderID)
+	if err != nil {
+		log.Printf("[Invoice Error] %v", err)
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Invoice tidak ditemukan atau gagal diproses",
+		})
+	}
+
+	c.Set("Content-Type", "application/pdf")
+	c.Set("Content-Disposition", "attachment; filename=\"Invoice_"+orderID+".pdf\"")
+	return c.Send(pdfBytes)
+}

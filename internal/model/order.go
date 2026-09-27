@@ -25,6 +25,10 @@ type Order struct {
 	Status          string         `gorm:"type:varchar(50);default:'pending';index" json:"status"`
 	SnapToken       string         `gorm:"type:text;default:''" json:"snap_token"`
 	SnapRedirectURL string         `gorm:"type:text;default:''" json:"snap_redirect_url"`
+	QRISURL         string         `gorm:"type:text;default:''" json:"qris_url,omitempty"`
+	QRISString      string         `gorm:"type:text;default:''" json:"qris_string,omitempty"`
+	VANumber        string         `gorm:"type:varchar(100);default:''" json:"va_number,omitempty"`
+	VABank          string         `gorm:"type:varchar(50);default:''" json:"va_bank,omitempty"`
 	PaymentType     string         `gorm:"type:varchar(50);default:''" json:"payment_type"`
 	PaidAt          *time.Time     `json:"paid_at,omitempty"`
 	OrderItems      []OrderItem    `gorm:"foreignKey:OrderID;references:OrderID" json:"items"`

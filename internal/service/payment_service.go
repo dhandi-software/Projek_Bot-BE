@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"crypto/sha512"
 	"encoding/hex"
 	"errors"
@@ -13,7 +14,9 @@ import (
 	"bot_be/internal/model"
 	"bot_be/internal/wshub"
 
+	"github.com/go-pdf/fpdf"
 	"github.com/midtrans/midtrans-go"
+	"github.com/midtrans/midtrans-go/coreapi"
 	"github.com/midtrans/midtrans-go/snap"
 	"gorm.io/gorm"
 )
@@ -35,6 +38,8 @@ type CheckoutCustomerRequest struct {
 
 type CreateCheckoutRequest struct {
 	IdempotencyKey string                  `json:"idempotency_key"`
+	PaymentMethod  string                  `json:"payment_method"`
+	Bank           string                  `json:"bank"`
 	Items          []CheckoutItemRequest   `json:"items"`
 	Customer       CheckoutCustomerRequest `json:"customer"`
 }
@@ -43,7 +48,12 @@ type CheckoutResponse struct {
 	OrderID         string  `json:"order_id"`
 	SnapToken       string  `json:"snap_token"`
 	SnapRedirectURL string  `json:"snap_redirect_url"`
+	QRISURL         string  `json:"qris_url,omitempty"`
+	QRISString      string  `json:"qris_string,omitempty"`
+	VANumber        string  `json:"va_number,omitempty"`
+	VABank          string  `json:"va_bank,omitempty"`
 	TotalAmount     float64 `json:"total_amount"`
+	Status          string  `json:"status"`
 	IsReused        bool    `json:"is_reused"`
 }
 
@@ -52,27 +62,32 @@ type PaymentService interface {
 	HandleNotification(payload map[string]interface{}) error
 	GetOrders() ([]model.Order, error)
 	GetOrderByID(orderID string) (*model.Order, error)
+	GenerateInvoicePDF(orderID string) ([]byte, error)
 }
 
 type paymentService struct {
 	cfg        *config.Config
 	db         *gorm.DB
 	snapClient snap.Client
+	coreClient coreapi.Client
 }
 
 func NewPaymentService(cfg *config.Config, db *gorm.DB) PaymentService {
 	var s snap.Client
+	var c coreapi.Client
 	env := midtrans.Sandbox
 	if cfg.MidtransIsProduction {
 		env = midtrans.Production
 	}
 
 	s.New(cfg.MidtransServerKey, env)
+	c.New(cfg.MidtransServerKey, env)
 
 	return &paymentService{
 		cfg:        cfg,
 		db:         db,
 		snapClient: s,
+		coreClient: c,
 	}
 }
 
@@ -93,7 +108,12 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 			OrderID:         existingOrder.OrderID,
 			SnapToken:       existingOrder.SnapToken,
 			SnapRedirectURL: existingOrder.SnapRedirectURL,
+			QRISURL:         existingOrder.QRISURL,
+			QRISString:      existingOrder.QRISString,
+			VANumber:        existingOrder.VANumber,
+			VABank:          existingOrder.VABank,
 			TotalAmount:     existingOrder.TotalAmount,
+			Status:          existingOrder.Status,
 			IsReused:        true,
 		}, nil
 	}
@@ -185,6 +205,77 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 
 	orderID := fmt.Sprintf("ORDER-%d-%s", time.Now().UnixNano(), req.IdempotencyKey[:minInt(8, len(req.IdempotencyKey))])
 
+	var qrisURL string
+	var qrisString string
+	var vaNumber string
+	var vaBank string
+
+	paymentMethod := strings.ToLower(strings.TrimSpace(req.PaymentMethod))
+
+	if paymentMethod == "wallet" || paymentMethod == "qris" || paymentMethod == "" {
+		qrisReq := &coreapi.ChargeReq{
+			PaymentType: coreapi.PaymentTypeQris,
+			TransactionDetails: midtrans.TransactionDetails{
+				OrderID:  orderID,
+				GrossAmt: itemsSum,
+			},
+			Items: &midtransItems,
+			CustomerDetails: &midtrans.CustomerDetails{
+				FName: req.Customer.Name,
+				Email: req.Customer.Email,
+				Phone: req.Customer.Phone,
+			},
+			Qris: &coreapi.QrisDetails{
+				Acquirer: "gopay",
+			},
+		}
+
+		coreResp, coreErr := s.coreClient.ChargeTransaction(qrisReq)
+		if coreErr == nil && coreResp != nil {
+			qrisString = coreResp.QRString
+			for _, act := range coreResp.Actions {
+				if act.Name == "generate-qr-code" {
+					qrisURL = act.URL
+					break
+				}
+			}
+			if qrisURL == "" && coreResp.TransactionID != "" {
+				qrisURL = fmt.Sprintf("https://api.sandbox.midtrans.com/v2/qris/%s/qr-code", coreResp.TransactionID)
+			}
+		} else if coreErr != nil {
+			log.Printf("[MIDTRANS QRIS CHARGE WARNING] %v", coreErr)
+		}
+	} else if paymentMethod == "bank" || paymentMethod == "va" {
+		bankName := strings.ToLower(strings.TrimSpace(req.Bank))
+		if bankName == "" {
+			bankName = "bca"
+		}
+		bankReq := &coreapi.ChargeReq{
+			PaymentType: coreapi.PaymentTypeBankTransfer,
+			TransactionDetails: midtrans.TransactionDetails{
+				OrderID:  orderID,
+				GrossAmt: itemsSum,
+			},
+			Items: &midtransItems,
+			CustomerDetails: &midtrans.CustomerDetails{
+				FName: req.Customer.Name,
+				Email: req.Customer.Email,
+				Phone: req.Customer.Phone,
+			},
+			BankTransfer: &coreapi.BankTransferDetails{
+				Bank: midtrans.Bank(bankName),
+			},
+		}
+
+		coreResp, coreErr := s.coreClient.ChargeTransaction(bankReq)
+		if coreErr == nil && coreResp != nil && len(coreResp.VaNumbers) > 0 {
+			vaNumber = coreResp.VaNumbers[0].VANumber
+			vaBank = coreResp.VaNumbers[0].Bank
+		} else if coreErr != nil {
+			log.Printf("[MIDTRANS VA CHARGE WARNING] %v", coreErr)
+		}
+	}
+
 	snapReq := &snap.Request{
 		TransactionDetails: midtrans.TransactionDetails{
 			OrderID:  orderID,
@@ -198,19 +289,12 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 		},
 	}
 
+	var snapToken string
+	var snapRedirectURL string
 	snapResp, snapErr := s.snapClient.CreateTransaction(snapReq)
-	if snapErr != nil {
-		if snapErr.StatusCode == 401 || strings.Contains(snapErr.Message, "Access denied") || strings.Contains(snapErr.Message, "unauthorized") {
-			return nil, errors.New("Midtrans Server Key tidak valid atau belum terdaftar di Midtrans Dashboard (HTTP 401 Unauthorized). Silakan periksa MIDTRANS_SERVER_KEY di file .env")
-		}
-		errMsg := snapErr.Message
-		if errMsg == "" && snapErr.RawError != nil {
-			errMsg = snapErr.RawError.Error()
-		}
-		if errMsg == "" {
-			errMsg = snapErr.Error()
-		}
-		return nil, fmt.Errorf("gagal membuat transaksi di Midtrans: %s", errMsg)
+	if snapErr == nil && snapResp != nil {
+		snapToken = snapResp.Token
+		snapRedirectURL = snapResp.RedirectURL
 	}
 
 	order := model.Order{
@@ -226,8 +310,13 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 		TotalAmount:     totalAmount,
 		TotalPrice:      totalAmount,
 		Status:          "pending",
-		SnapToken:       snapResp.Token,
-		SnapRedirectURL: snapResp.RedirectURL,
+		SnapToken:       snapToken,
+		SnapRedirectURL: snapRedirectURL,
+		QRISURL:         qrisURL,
+		QRISString:      qrisString,
+		VANumber:        vaNumber,
+		VABank:          vaBank,
+		PaymentType:     paymentMethod,
 		OrderItems:      orderItems,
 	}
 
@@ -240,9 +329,14 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 
 	return &CheckoutResponse{
 		OrderID:         orderID,
-		SnapToken:       snapResp.Token,
-		SnapRedirectURL: snapResp.RedirectURL,
+		SnapToken:       snapToken,
+		SnapRedirectURL: snapRedirectURL,
+		QRISURL:         qrisURL,
+		QRISString:      qrisString,
+		VANumber:        vaNumber,
+		VABank:          vaBank,
 		TotalAmount:     totalAmount,
+		Status:          "pending",
 		IsReused:        false,
 	}, nil
 }
@@ -382,6 +476,93 @@ func (s *paymentService) GetOrderByID(orderID string) (*model.Order, error) {
 		return nil, err
 	}
 	return &order, nil
+}
+
+func (s *paymentService) GenerateInvoicePDF(orderID string) ([]byte, error) {
+	order, err := s.GetOrderByID(orderID)
+	if err != nil {
+		return nil, fmt.Errorf("order tidak ditemukan: %w", err)
+	}
+
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.AddPage()
+
+	pdf.SetFillColor(27, 99, 146)
+	pdf.Rect(0, 0, 210, 30, "F")
+
+	pdf.SetTextColor(255, 255, 255)
+	pdf.SetFont("Arial", "B", 16)
+	pdf.Text(14, 18, "DHANDI ECOMMERCE")
+	pdf.SetFont("Arial", "", 10)
+	pdf.Text(140, 18, "INVOICE PEMBAYARAN RESMI")
+
+	pdf.SetTextColor(30, 30, 30)
+	pdf.SetFont("Arial", "B", 11)
+	pdf.Text(14, 42, "Rincian Pesanan & Pembayaran:")
+
+	pdf.SetFont("Arial", "", 9)
+	pdf.Text(14, 50, fmt.Sprintf("Nomor Pesanan (Order ID): %s", order.OrderID))
+	pdf.Text(14, 56, fmt.Sprintf("Tanggal: %s", order.CreatedAt.Format("02 January 2006 15:04 WIB")))
+	pdf.Text(14, 62, fmt.Sprintf("Status Pembayaran: %s", strings.ToUpper(order.Status)))
+	paymentTypeDisplay := order.PaymentType
+	if paymentTypeDisplay == "" {
+		paymentTypeDisplay = "QRIS / VA"
+	}
+	pdf.Text(14, 68, fmt.Sprintf("Metode Pembayaran: Midtrans (%s)", paymentTypeDisplay))
+
+	custName := order.CustomerName
+	if custName == "" {
+		custName = "Customer"
+	}
+	custEmail := order.CustomerEmail
+	if custEmail == "" {
+		custEmail = "-"
+	}
+	custPhone := order.CustomerPhone
+	if custPhone == "" {
+		custPhone = "-"
+	}
+	custAddress := order.ShippingAddress
+	if custAddress == "" {
+		custAddress = "Indonesia"
+	}
+
+	pdf.Text(120, 50, fmt.Sprintf("Nama Pembeli: %s", custName))
+	pdf.Text(120, 56, fmt.Sprintf("Email: %s", custEmail))
+	pdf.Text(120, 62, fmt.Sprintf("No. Telepon: %s", custPhone))
+	pdf.Text(120, 68, fmt.Sprintf("Alamat: %s", truncateString(custAddress, 35)))
+
+	pdf.SetY(78)
+	pdf.SetFont("Arial", "B", 9)
+	pdf.SetFillColor(45, 165, 243)
+	pdf.SetTextColor(255, 255, 255)
+
+	pdf.CellFormat(90, 8, " Nama Produk", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(20, 8, " Qty", "1", 0, "C", true, 0, "")
+	pdf.CellFormat(36, 8, " Harga Satuan", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(36, 8, " Total", "1", 1, "R", true, 0, "")
+
+	pdf.SetFont("Arial", "", 9)
+	pdf.SetTextColor(30, 30, 30)
+
+	for _, item := range order.OrderItems {
+		pdf.CellFormat(90, 8, fmt.Sprintf(" %s", truncateString(item.Title, 45)), "1", 0, "L", false, 0, "")
+		pdf.CellFormat(20, 8, fmt.Sprintf("%d ", item.Quantity), "1", 0, "C", false, 0, "")
+		pdf.CellFormat(36, 8, fmt.Sprintf("Rp %.0f ", item.Price), "1", 0, "R", false, 0, "")
+		pdf.CellFormat(36, 8, fmt.Sprintf("Rp %.0f ", item.Price*float64(item.Quantity)), "1", 1, "R", false, 0, "")
+	}
+
+	pdf.SetFont("Arial", "B", 10)
+	pdf.CellFormat(146, 8, "Total Pembayaran: ", "1", 0, "R", false, 0, "")
+	pdf.CellFormat(36, 8, fmt.Sprintf("Rp %.0f ", order.TotalAmount), "1", 1, "R", false, 0, "")
+
+	var buf bytes.Buffer
+	err = pdf.Output(&buf)
+	if err != nil {
+		return nil, fmt.Errorf("gagal merender PDF: %w", err)
+	}
+
+	return buf.Bytes(), nil
 }
 
 func minInt(a, b int) int {

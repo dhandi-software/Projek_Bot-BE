@@ -160,6 +160,7 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Post("/payment/notification", paymentHandler.HandleNotification)
 	api.Get("/orders", paymentHandler.GetOrders)
 	api.Get("/orders/:id", paymentHandler.GetOrderByID)
+	api.Get("/orders/:id/invoice", paymentHandler.GetOrderInvoice)
 
 	// Simple Health Check
 	api.Get("/health", func(c *fiber.Ctx) error {
