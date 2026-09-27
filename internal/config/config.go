@@ -17,6 +17,11 @@ type Config struct {
 	DBPassword         string
 	DBName             string
 	DBPort             string
+
+	MidtransServerKey    string
+	MidtransClientKey    string
+	MidtransMerchantID   string
+	MidtransIsProduction bool
 }
 
 func LoadConfig() *Config {
@@ -26,15 +31,19 @@ func LoadConfig() *Config {
 	}
 
 	return &Config{
-		Port:               getEnv("PORT", "8080"),
-		ClientURL:          getEnv("CLIENT_URL", "http://localhost:5173"),
-		CORSAllowedOrigins: getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://localhost:5174"),
-		SpreadsheetID:      getEnv("SPREADSHEET_ID", ""),
-		DBHost:             getEnv("DB_HOST", "localhost"),
-		DBUser:             getEnv("DB_USER", "postgres"),
-		DBPassword:         getEnv("DB_PASSWORD", "your_db_password"),
-		DBName:             getEnv("DB_NAME", "your_db_name"),
-		DBPort:             getEnv("DB_PORT", "5432"),
+		Port:                 getEnv("PORT", "8080"),
+		ClientURL:            getEnv("CLIENT_URL", "http://localhost:5173"),
+		CORSAllowedOrigins:   getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://localhost:5174"),
+		SpreadsheetID:        getEnv("SPREADSHEET_ID", ""),
+		DBHost:               getEnv("DB_HOST", "localhost"),
+		DBUser:               getEnv("DB_USER", "postgres"),
+		DBPassword:           getEnv("DB_PASSWORD", "your_db_password"),
+		DBName:               getEnv("DB_NAME", "your_db_name"),
+		DBPort:               getEnv("DB_PORT", "5432"),
+		MidtransServerKey:    getEnv("MIDTRANS_SERVER_KEY", ""),
+		MidtransClientKey:    getEnv("MIDTRANS_CLIENT_KEY", ""),
+		MidtransMerchantID:   getEnv("MIDTRANS_MERCHANT_ID", ""),
+		MidtransIsProduction: getEnv("MIDTRANS_IS_PRODUCTION", "false") == "true",
 	}
 }
 

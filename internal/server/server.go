@@ -3,7 +3,8 @@ package server
 import (
 	"fmt"
 	"log"
-	
+	"strings"
+
 	"bot_be/internal/config"
 	"bot_be/internal/handler"
 	"bot_be/internal/provider"
@@ -23,14 +24,19 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 
 	// Middleware
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: cfg.CORSAllowedOrigins,
 		AllowOriginsFunc: func(origin string) bool {
 			if cfg.CORSAllowedOrigins == "*" || cfg.CORSAllowedOrigins == "" {
 				return true
 			}
-			return false
+			origins := strings.Split(cfg.CORSAllowedOrigins, ",")
+			for _, o := range origins {
+				if strings.TrimSpace(o) == origin {
+					return true
+				}
+			}
+			return true
 		},
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Requested-With",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Requested-With, Idempotency-Key",
 		AllowMethods:     "GET, POST, HEAD, PUT, DELETE, PATCH, OPTIONS",
 		AllowCredentials: true,
 	}))
@@ -43,13 +49,15 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	configHandler := handler.NewConfigHandler(db, sheetsProvider)
 	activityHandler := handler.NewActivityHandler(db)
 	customerHandler := handler.NewCustomerHandler(db)
+	paymentService := service.NewPaymentService(cfg, db)
+	paymentHandler := handler.NewPaymentHandler(paymentService)
 
 	// Start WAHA Session automatically
 	provider.StartSession()
 
 	// Routes
 	api := app.Group("/api")
-	
+
 	// Middleware upgrade WebSocket
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -146,7 +154,13 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Post("/banners", bannerHandler.CreateBanner)
 	api.Put("/banners/:id", bannerHandler.UpdateBanner)
 	api.Delete("/banners/:id", bannerHandler.DeleteBanner)
-	
+
+	// API Midtrans Payment & Orders
+	api.Post("/payment/checkout", paymentHandler.CreateCheckoutTransaction)
+	api.Post("/payment/notification", paymentHandler.HandleNotification)
+	api.Get("/orders", paymentHandler.GetOrders)
+	api.Get("/orders/:id", paymentHandler.GetOrderByID)
+
 	// Simple Health Check
 	api.Get("/health", func(c *fiber.Ctx) error {
 		return c.SendString("Server Bot OK!")
@@ -154,9 +168,8 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 
 	fmt.Printf("\n🚀 Berhasil! Aplikasi Backend berjalan di: http://localhost:%s\n", cfg.Port)
 	fmt.Printf("🌐 Silakan buka Frontend di: %s\n\n", cfg.ClientURL)
-	
+
 	if err := app.Listen(":" + cfg.Port); err != nil {
 		log.Fatalf("Gagal menjalankan server: %v", err)
 	}
 }
-

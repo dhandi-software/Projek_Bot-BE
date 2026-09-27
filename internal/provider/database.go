@@ -49,8 +49,38 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 	db.Exec("ALTER TABLE products ALTER COLUMN sku DROP NOT NULL")
 	db.Exec("ALTER TABLE products ALTER COLUMN category DROP NOT NULL")
 
+	// Drop legacy foreign key constraints on order_items if present from earlier migrations
+	db.Exec("ALTER TABLE order_items DROP CONSTRAINT IF EXISTS fk_orders_order_items")
+	db.Exec("ALTER TABLE order_items DROP CONSTRAINT IF EXISTS fk_order_items_order")
+	db.Exec("ALTER TABLE order_items DROP CONSTRAINT IF EXISTS fk_orders_items")
+
+	// Ensure order_id and order_number columns in orders and order_items are VARCHAR(100)
+	db.Exec("UPDATE orders SET order_number = order_id WHERE (order_number IS NULL OR order_number = '') AND order_id IS NOT NULL")
+	db.Exec("UPDATE orders SET order_number = '' WHERE order_number IS NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN order_number DROP NOT NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN user_id DROP NOT NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN total_price DROP NOT NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN customer_id DROP NOT NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN customer_name DROP NOT NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN customer_email DROP NOT NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN customer_phone DROP NOT NULL")
+	db.Exec("ALTER TABLE orders ALTER COLUMN shipping_address DROP NOT NULL")
+
+	db.Exec("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS order_id VARCHAR(100)")
+	db.Exec("ALTER TABLE order_items ALTER COLUMN order_id TYPE VARCHAR(100) USING order_id::varchar")
+	db.Exec("ALTER TABLE orders ALTER COLUMN order_id TYPE VARCHAR(100) USING order_id::varchar")
+	db.Exec("ALTER TABLE orders ALTER COLUMN order_number TYPE VARCHAR(100) USING order_number::varchar")
+
+	// Ensure order_items columns exist if table was created in earlier schema
+	db.Exec("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS title VARCHAR(255) DEFAULT ''")
+	db.Exec("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS product_id BIGINT DEFAULT 0")
+	db.Exec("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS quantity INT DEFAULT 1")
+	db.Exec("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS price NUMERIC(15,2) DEFAULT 0")
+	db.Exec("UPDATE order_items SET title = name WHERE (title IS NULL OR title = '') AND name IS NOT NULL AND name != ''")
+	db.Exec("UPDATE order_items SET title = product_name WHERE (title IS NULL OR title = '') AND product_name IS NOT NULL AND product_name != ''")
+
 	// Jalankan Auto Migrate
-	err = db.AutoMigrate(&model.Admin{}, &model.Customer{}, &model.AppConfig{}, &model.ActivityLog{}, &model.Product{}, &model.Banner{}, &model.Category{})
+	err = db.AutoMigrate(&model.Admin{}, &model.Customer{}, &model.AppConfig{}, &model.ActivityLog{}, &model.Product{}, &model.Banner{}, &model.Category{}, &model.Order{}, &model.OrderItem{})
 	if err != nil {
 		log.Println("Peringatan migrasi gabungan:", err)
 		_ = db.AutoMigrate(&model.Admin{})
@@ -60,6 +90,8 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 		_ = db.AutoMigrate(&model.Product{})
 		_ = db.AutoMigrate(&model.Banner{})
 		_ = db.AutoMigrate(&model.Category{})
+		_ = db.AutoMigrate(&model.Order{})
+		_ = db.AutoMigrate(&model.OrderItem{})
 	}
 
 	log.Println("Migrasi tabel berhasil")

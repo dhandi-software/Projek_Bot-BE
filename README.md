@@ -197,9 +197,35 @@ type Category struct {
 
 ---
 
+### 💳 7. Midtrans Payment & Order API (`/api/payment` & `/api/orders`)
+
+| Method | Endpoint | Deskripsi |
+| :--- | :--- | :--- |
+| `POST` | `/api/payment/checkout` | Membuat transaksi Snap token Midtrans dengan proteksi Idempotency Key |
+| `POST` | `/api/payment/notification` | Webhook penampung notifikasi dari Midtrans (Verifikasi Signature SHA512) |
+| `GET` | `/api/orders` | Mengambil seluruh riwayat transaksi order |
+| `GET` | `/api/orders/:id` | Mengambil detail order berdasarkan `order_id` |
+
+---
+
+## 🔒 Proteksi Keamanan & Idempotency Key
+
+### 🛡️ Proteksi SQL Injection
+Seluruh layer database menggunakan ORM **GORM** dengan **Parameterized Prepared Queries** (`db.Where("column = ?", value)`). Tidak ada string concatenation pada query database untuk mencegah serangan SQL Injection secara total.
+
+### 🔄 Pembayaran Idempotent (Anti Sinyal Buruk / Double Charge)
+Untuk mengantisipasi masalah koneksi internet buruk atau penekanan tombol bayar berkali-kali:
+1. Client mengirimkan `idempotency_key` pada request checkout (bisa via JSON body atau HTTP Header `Idempotency-Key`).
+2. Backend mengecek ketersediaan `idempotency_key` di database:
+   - Jika key sudah terdaftar, backend **langsung mengembalikan token & URL transaksi yang sama** tanpa membuat invoice/charge baru ke Midtrans.
+   - Jika key belum ada, backend memproses pesanan baru dan memanggil API Midtrans Snap.
+3. Webhook callback dari Midtrans juga diproses secara idempotent. Jika status order sudah `paid`, notifikasi duplikat akan diabaikan secara aman.
+
+---
+
 ## ⚙️ Pengaturan Environment Variables (`.env`)
 
-Buat file `.env` di direktori `Bot_BE/` dengan konfigurasi berikut:
+Buat file `.env` di direktori `Bot_BE/` (salin dari `.env.example`):
 
 ```env
 PORT=8080
@@ -207,16 +233,22 @@ CLIENT_URL=http://localhost:5173
 CORS_ALLOWED_ORIGINS=*
 
 # Database Configuration
-DB_DRIVER=sqlite
-DB_SOURCE=data/bot.db
+DB_HOST=localhost
+DB_USER=postgres
+DB_PASSWORD=your_db_password
+DB_NAME=Projek_Bot
+DB_PORT=5432
 
 # WAHA WhatsApp Engine
-WAHA_BASE_URL=http://localhost:3000
-WAHA_API_KEY=your_secret_key
-WAHA_SESSION=default
+WAHA_API_URL=http://localhost:3001
+N8N_WEBHOOK_URL=https://your-n8n-instance.cloud/webhook/your-webhook-id
 
-# JWT Authentication
-JWT_SECRET=super_secret_jwt_key_12345
+# Midtrans Payment Gateway Configuration
+# ⚠️ PENTING: Jangan commit file .env yang berisi kunci asli ke repositori git!
+MIDTRANS_MERCHANT_ID=your_midtrans_merchant_id
+MIDTRANS_CLIENT_KEY=your_midtrans_client_key
+MIDTRANS_SERVER_KEY=your_midtrans_server_key
+MIDTRANS_IS_PRODUCTION=false
 ```
 
 ---
@@ -232,10 +264,11 @@ cp .env.example .env
 go mod tidy
 
 # Jalankan server backend
-go run cmd/main.go
+go run cmd/app/main.go
 ```
 
 ### 2. Jalankan via Docker Compose
 ```bash
 docker-compose up -d --build
 ```
+
