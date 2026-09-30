@@ -4,38 +4,23 @@ import (
 	"strings"
 
 	"bot_be/internal/model"
+	"bot_be/internal/service"
 
 	"github.com/gofiber/fiber/v2"
-	"gorm.io/gorm"
 )
 
 type CategoryHandler struct {
-	db *gorm.DB
+	categoryService service.CategoryService
 }
 
-func NewCategoryHandler(db *gorm.DB) *CategoryHandler {
-	return &CategoryHandler{db: db}
+func NewCategoryHandler(categoryService service.CategoryService) *CategoryHandler {
+	return &CategoryHandler{categoryService: categoryService}
 }
 
 func (h *CategoryHandler) GetCategories(c *fiber.Ctx) error {
-	var categories []model.Category
-	if err := h.db.Order("name asc").Find(&categories).Error; err != nil {
+	categories, err := h.categoryService.GetCategories()
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal mengambil data kategori"})
-	}
-
-	if len(categories) == 0 {
-		defaultCategories := []model.Category{
-			{Name: "Computer & Laptop", Slug: "computer-laptop", Description: "Perangkat Komputer dan Laptop", Icon: "Laptop", IsActive: true},
-			{Name: "Gaming Console", Slug: "gaming-console", Description: "Konsol Game dan Aksesoris", Icon: "Gaming", IsActive: true},
-			{Name: "Smartphone", Slug: "smartphone", Description: "Ponsel Pintar dan Tablet", Icon: "Smartphone", IsActive: true},
-			{Name: "Headphone", Slug: "headphone", Description: "Headphone, Earphone, Audio", Icon: "Headphone", IsActive: true},
-			{Name: "Computer Accessories", Slug: "computer-accessories", Description: "Aksesoris Komputer", Icon: "Plug", IsActive: true},
-			{Name: "Umum", Slug: "umum", Description: "Kategori Umum", Icon: "Package", IsActive: true},
-		}
-		for _, cat := range defaultCategories {
-			h.db.Create(&cat)
-		}
-		h.db.Order("name asc").Find(&categories)
 	}
 
 	return c.JSON(fiber.Map{
@@ -68,8 +53,7 @@ func (h *CategoryHandler) CreateCategory(c *fiber.Ctx) error {
 		isActive = val
 	}
 
-	var existing model.Category
-	if err := h.db.Where("LOWER(name) = LOWER(?)", name).First(&existing).Error; err == nil {
+	if existing, _ := h.categoryService.GetCategoryByName(name); existing != nil {
 		return c.Status(400).JSON(fiber.Map{
 			"error": "Kategori dengan nama ini sudah ada",
 		})
@@ -83,7 +67,7 @@ func (h *CategoryHandler) CreateCategory(c *fiber.Ctx) error {
 		IsActive:    isActive,
 	}
 
-	if err := h.db.Create(&category).Error; err != nil {
+	if err := h.categoryService.CreateCategory(&category); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal menyimpan kategori: " + err.Error()})
 	}
 
@@ -95,9 +79,8 @@ func (h *CategoryHandler) CreateCategory(c *fiber.Ctx) error {
 
 func (h *CategoryHandler) UpdateCategory(c *fiber.Ctx) error {
 	id := c.Params("id")
-	var category model.Category
-
-	if err := h.db.First(&category, id).Error; err != nil {
+	category, err := h.categoryService.GetCategoryByID(id)
+	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "Kategori tidak ditemukan"})
 	}
 
@@ -108,8 +91,7 @@ func (h *CategoryHandler) UpdateCategory(c *fiber.Ctx) error {
 
 	if name, ok := body["name"].(string); ok && strings.TrimSpace(name) != "" {
 		newName := strings.TrimSpace(name)
-		var existing model.Category
-		if err := h.db.Where("LOWER(name) = LOWER(?) AND id != ?", newName, category.ID).First(&existing).Error; err == nil {
+		if existing, _ := h.categoryService.GetCategoryByName(newName); existing != nil && existing.ID != category.ID {
 			return c.Status(400).JSON(fiber.Map{"error": "Kategori dengan nama ini sudah ada"})
 		}
 		category.Name = newName
@@ -125,7 +107,7 @@ func (h *CategoryHandler) UpdateCategory(c *fiber.Ctx) error {
 		category.IsActive = val
 	}
 
-	if err := h.db.Save(&category).Error; err != nil {
+	if err := h.categoryService.UpdateCategory(category); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal memperbarui kategori: " + err.Error()})
 	}
 
@@ -137,7 +119,7 @@ func (h *CategoryHandler) UpdateCategory(c *fiber.Ctx) error {
 
 func (h *CategoryHandler) DeleteCategory(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.db.Delete(&model.Category{}, id).Error; err != nil {
+	if err := h.categoryService.DeleteCategory(id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal menghapus kategori"})
 	}
 

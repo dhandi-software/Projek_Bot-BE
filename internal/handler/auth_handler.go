@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strings"
+
 	"bot_be/internal/model"
 
 	"github.com/gofiber/fiber/v2"
@@ -40,10 +42,18 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		})
 	}
 
-	// 1. Cek pada tabel Customer (email / phone)
+	username := strings.TrimSpace(req.Username)
+	password := req.Password
+
+	if username == "" || password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Username/email dan password wajib diisi",
+		})
+	}
+
 	var customer model.Customer
-	if err := h.DB.Where("email = ? OR phone = ?", req.Username, req.Username).First(&customer).Error; err == nil {
-		if errPass := bcrypt.CompareHashAndPassword([]byte(customer.Password), []byte(req.Password)); errPass == nil {
+	if err := h.DB.Where("email = ? OR phone = ?", username, username).First(&customer).Error; err == nil {
+		if errPass := bcrypt.CompareHashAndPassword([]byte(customer.Password), []byte(password)); errPass == nil {
 			return c.JSON(fiber.Map{
 				"message": "Login customer berhasil",
 				"token":   "customer-jwt-token-demo",
@@ -59,10 +69,9 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		}
 	}
 
-	// 2. Cek pada tabel Admin (username)
 	var admin model.Admin
-	if err := h.DB.Where("username = ?", req.Username).First(&admin).Error; err == nil {
-		if errPass := bcrypt.CompareHashAndPassword([]byte(admin.Password), []byte(req.Password)); errPass == nil {
+	if err := h.DB.Where("username = ? OR email = ?", username, username).First(&admin).Error; err == nil {
+		if errPass := bcrypt.CompareHashAndPassword([]byte(admin.Password), []byte(password)); errPass == nil {
 			return c.JSON(fiber.Map{
 				"message": "Login admin berhasil",
 				"token":   "admin-jwt-token-demo",

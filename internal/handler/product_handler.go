@@ -8,18 +8,18 @@ import (
 	"time"
 
 	"bot_be/internal/model"
+	"bot_be/internal/service"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 type ProductHandler struct {
-	db *gorm.DB
+	productService service.ProductService
 }
 
-func NewProductHandler(db *gorm.DB) *ProductHandler {
-	return &ProductHandler{db: db}
+func NewProductHandler(productService service.ProductService) *ProductHandler {
+	return &ProductHandler{productService: productService}
 }
 
 func stringifyFlexJSON(v interface{}) string {
@@ -35,7 +35,6 @@ func stringifyFlexJSON(v interface{}) string {
 	}
 	return string(bytes)
 }
-
 
 func parseFlexFloat(v interface{}) float64 {
 	if v == nil {
@@ -81,31 +80,18 @@ func parseFlexInt(v interface{}) int {
 }
 
 func (h *ProductHandler) GetProducts(c *fiber.Ctx) error {
-	var products []model.Product
-
-	query := h.db.Model(&model.Product{})
-
-	if cat := c.Query("category"); cat != "" && cat != "ALL" {
-		query = query.Where("LOWER(category) = LOWER(?)", cat)
-	}
-	if search := c.Query("q"); search != "" {
-		searchTerm := "%" + search + "%"
-		query = query.Where("LOWER(title) LIKE LOWER(?) OR LOWER(sku) LIKE LOWER(?) OR LOWER(brand) LIKE LOWER(?) OR LOWER(materials) LIKE LOWER(?)", searchTerm, searchTerm, searchTerm, searchTerm)
-	}
-	if featured := c.Query("featured"); featured == "true" {
-		query = query.Where("is_featured = ?", true)
-	}
-	if activeOnly := c.Query("active"); activeOnly == "true" {
-		query = query.Where("is_active = ?", true)
-	}
-	if status := c.Query("status"); status != "" {
-		query = query.Where("LOWER(status) = LOWER(?)", status)
-	}
-	if bestDeals := c.Query("best_deals"); bestDeals == "true" {
-		query = query.Where("is_best_deal = ? AND best_deal_expires_at IS NOT NULL AND best_deal_expires_at > ?", true, c.Context().Time())
+	filter := service.ProductFilter{
+		Category:  c.Query("category"),
+		Query:     c.Query("q"),
+		Featured:  c.Query("featured") == "true",
+		Active:    c.Query("active") == "true",
+		Status:    c.Query("status"),
+		BestDeals: c.Query("best_deals") == "true",
+		Now:       c.Context().Time(),
 	}
 
-	if err := query.Order("id desc").Find(&products).Error; err != nil {
+	products, err := h.productService.GetProducts(filter)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal mengambil data produk"})
 	}
 
@@ -117,19 +103,11 @@ func (h *ProductHandler) GetProducts(c *fiber.Ctx) error {
 
 func (h *ProductHandler) GetProductByID(c *fiber.Ctx) error {
 	param := c.Params("id")
-	var product model.Product
-
-	if num, err := strconv.ParseUint(param, 10, 64); err == nil {
-		if err := h.db.Where("id = ? OR LOWER(sku) = LOWER(?)", num, param).First(&product).Error; err == nil {
-			return c.JSON(product)
-		}
-	} else {
-		if err := h.db.Where("LOWER(sku) = LOWER(?)", param).First(&product).Error; err == nil {
-			return c.JSON(product)
-		}
+	product, err := h.productService.GetProductByID(param)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
 	}
-
-	return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
+	return c.JSON(product)
 }
 
 func (h *ProductHandler) CreateProduct(c *fiber.Ctx) error {
@@ -237,7 +215,7 @@ func (h *ProductHandler) CreateProduct(c *fiber.Ctx) error {
 		Specifications:    specificationsStr,
 	}
 
-	if err := h.db.Create(&product).Error; err != nil {
+	if err := h.productService.CreateProduct(&product); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal menyimpan produk: " + err.Error()})
 	}
 
@@ -248,10 +226,9 @@ func (h *ProductHandler) CreateProduct(c *fiber.Ctx) error {
 }
 
 func (h *ProductHandler) UpdateProduct(c *fiber.Ctx) error {
-	id := c.Params("id")
-	var product model.Product
-
-	if err := h.db.First(&product, id).Error; err != nil {
+	idStr := c.Params("id")
+	product, err := h.productService.GetProductByID(idStr)
+	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "Produk tidak ditemukan"})
 	}
 
@@ -269,11 +246,9 @@ func (h *ProductHandler) UpdateProduct(c *fiber.Ctx) error {
 	if cat, ok := body["category"].(string); ok && cat != "" {
 		product.Category = cat
 	}
-
 	if sku, ok := body["sku"].(string); ok && sku != "" {
 		product.SKU = sku
 	}
-
 	if brand, ok := body["brand"].(string); ok {
 		product.Brand = brand
 	}
@@ -362,7 +337,7 @@ func (h *ProductHandler) UpdateProduct(c *fiber.Ctx) error {
 		product.BestDealExpiresAt = &expires
 	}
 
-	if err := h.db.Select("*").Save(&product).Error; err != nil {
+	if err := h.productService.UpdateProduct(product); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal memperbarui produk: " + err.Error()})
 	}
 
@@ -370,12 +345,16 @@ func (h *ProductHandler) UpdateProduct(c *fiber.Ctx) error {
 		"message": "Produk berhasil diperbarui",
 		"data":    product,
 	})
-
 }
 
 func (h *ProductHandler) DeleteProduct(c *fiber.Ctx) error {
-	id := c.Params("id")
-	if err := h.db.Delete(&model.Product{}, id).Error; err != nil {
+	idStr := c.Params("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID produk tidak valid"})
+	}
+
+	if err := h.productService.DeleteProduct(uint(id)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal menghapus produk: " + err.Error()})
 	}
 
@@ -409,7 +388,7 @@ func (h *ProductHandler) BulkCreateProducts(c *fiber.Ctx) error {
 		products[i].IsActive = true
 	}
 
-	if err := h.db.Create(&products).Error; err != nil {
+	if err := h.productService.BulkCreateProducts(products); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal melakukan import produk: " + err.Error()})
 	}
 

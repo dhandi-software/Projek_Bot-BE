@@ -48,8 +48,20 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	authHandler := handler.NewAuthHandler(db)
 	configHandler := handler.NewConfigHandler(db, sheetsProvider)
 	activityHandler := handler.NewActivityHandler(db)
-	customerHandler := handler.NewCustomerHandler(db)
-	paymentService := service.NewPaymentService(cfg, db)
+	customerService := service.NewCustomerService(db)
+	customerHandler := handler.NewCustomerHandler(customerService, db)
+	dashboardHandler := handler.NewDashboardHandler(db)
+	productService := service.NewProductService(db)
+	productHandler := handler.NewProductHandler(productService)
+	categoryService := service.NewCategoryService(db)
+	categoryHandler := handler.NewCategoryHandler(categoryService)
+	bannerService := service.NewBannerService(db)
+	bannerHandler := handler.NewBannerHandler(bannerService)
+	orderService := service.NewOrderService(db)
+	invoiceService := service.NewInvoiceService(db, orderService)
+	paymentService := service.NewPaymentService(cfg, db, orderService, invoiceService)
+	orderHandler := handler.NewOrderHandler(orderService)
+	invoiceHandler := handler.NewInvoiceHandler(invoiceService)
 	paymentHandler := handler.NewPaymentHandler(paymentService)
 
 	// Start WAHA Session automatically
@@ -94,7 +106,7 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Put("/customer/profile", customerHandler.UpdateCustomerProfile)
 	api.Post("/customer/profile", customerHandler.UpdateCustomerProfile)
 	api.Get("/admin/customers", customerHandler.GetAdminCustomers)
-	api.Get("/admin/dashboard/stats", customerHandler.GetDashboardStats)
+	api.Get("/admin/dashboard/stats", dashboardHandler.GetDashboardStats)
 
 	// API Activities
 	api.Get("/activities", activityHandler.GetActivities)
@@ -132,7 +144,6 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Post("/chat/send", chatHandler.SendMessage)
 
 	// API Products CRUD
-	productHandler := handler.NewProductHandler(db)
 	api.Get("/products", productHandler.GetProducts)
 	api.Get("/products/search", productHandler.SearchProducts)
 	api.Get("/products/:id", productHandler.GetProductByID)
@@ -142,24 +153,28 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Delete("/products/:id", productHandler.DeleteProduct)
 
 	// API Categories CRUD
-	categoryHandler := handler.NewCategoryHandler(db)
 	api.Get("/categories", categoryHandler.GetCategories)
 	api.Post("/categories", categoryHandler.CreateCategory)
 	api.Put("/categories/:id", categoryHandler.UpdateCategory)
 	api.Delete("/categories/:id", categoryHandler.DeleteCategory)
 
 	// API Banners CRUD
-	bannerHandler := handler.NewBannerHandler(db)
 	api.Get("/banners", bannerHandler.GetBanners)
 	api.Post("/banners", bannerHandler.CreateBanner)
 	api.Put("/banners/:id", bannerHandler.UpdateBanner)
 	api.Delete("/banners/:id", bannerHandler.DeleteBanner)
 
-	// API Midtrans Payment & Orders
+	// API Midtrans Payment, Orders & Invoice
 	api.Post("/payment/checkout", paymentHandler.CreateCheckoutTransaction)
+	api.Post("/payment/callback", paymentHandler.HandleNotification)
+	api.Post("/payment/webhook", paymentHandler.HandleNotification)
+	api.Post("/payment/verify", paymentHandler.HandleNotification)
 	api.Post("/payment/notification", paymentHandler.HandleNotification)
-	api.Get("/orders", paymentHandler.GetOrders)
-	api.Get("/orders/:id", paymentHandler.GetOrderByID)
+	api.Get("/orders", orderHandler.GetOrders)
+	api.Get("/orders/:id", orderHandler.GetOrderByID)
+	api.Put("/orders/:id/cancel", orderHandler.CancelOrder)
+	api.Post("/orders/:id/cancel", orderHandler.CancelOrder)
+	api.Get("/orders/:id/invoice", invoiceHandler.GetOrderInvoice)
 
 	// Simple Health Check
 	api.Get("/health", func(c *fiber.Ctx) error {
