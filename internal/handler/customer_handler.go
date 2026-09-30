@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strings"
+
 	"bot_be/internal/model"
 	"bot_be/internal/service"
 
@@ -100,7 +102,16 @@ func (h *CustomerHandler) LoginCustomer(c *fiber.Ctx) error {
 		})
 	}
 
-	customer, err := h.customerService.GetCustomerByEmail(req.Email)
+	email := strings.TrimSpace(req.Email)
+	password := req.Password
+
+	if email == "" || password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Email/Nomor HP dan password wajib diisi",
+		})
+	}
+
+	customer, err := h.customerService.GetCustomerByEmail(email)
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "Email/Nomor HP atau password salah",
