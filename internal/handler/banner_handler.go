@@ -2,28 +2,23 @@ package handler
 
 import (
 	"bot_be/internal/model"
+	"bot_be/internal/service"
 
 	"github.com/gofiber/fiber/v2"
-	"gorm.io/gorm"
 )
 
 type BannerHandler struct {
-	db *gorm.DB
+	bannerService service.BannerService
 }
 
-func NewBannerHandler(db *gorm.DB) *BannerHandler {
-	return &BannerHandler{db: db}
+func NewBannerHandler(bannerService service.BannerService) *BannerHandler {
+	return &BannerHandler{bannerService: bannerService}
 }
 
 func (h *BannerHandler) GetBanners(c *fiber.Ctx) error {
-	var banners []model.Banner
-	query := h.db.Model(&model.Banner{})
-
-	if activeOnly := c.Query("active"); activeOnly == "true" {
-		query = query.Where("is_active = ?", true)
-	}
-
-	if err := query.Order("sort_order asc, id desc").Find(&banners).Error; err != nil {
+	activeOnly := c.Query("active") == "true"
+	banners, err := h.bannerService.GetBanners(activeOnly)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal mengambil data banner"})
 	}
 
@@ -43,7 +38,7 @@ func (h *BannerHandler) CreateBanner(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Judul dan gambar banner wajib diisi"})
 	}
 
-	if err := h.db.Create(&banner).Error; err != nil {
+	if err := h.bannerService.CreateBanner(&banner); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal menyimpan banner"})
 	}
 
@@ -55,9 +50,8 @@ func (h *BannerHandler) CreateBanner(c *fiber.Ctx) error {
 
 func (h *BannerHandler) UpdateBanner(c *fiber.Ctx) error {
 	id := c.Params("id")
-	var banner model.Banner
-
-	if err := h.db.First(&banner, id).Error; err != nil {
+	banner, err := h.bannerService.GetBannerByID(id)
+	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "Banner tidak ditemukan"})
 	}
 
@@ -77,7 +71,7 @@ func (h *BannerHandler) UpdateBanner(c *fiber.Ctx) error {
 	banner.IsActive = payload.IsActive
 	banner.SortOrder = payload.SortOrder
 
-	if err := h.db.Save(&banner).Error; err != nil {
+	if err := h.bannerService.UpdateBanner(banner); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal memperbarui banner"})
 	}
 
@@ -89,7 +83,7 @@ func (h *BannerHandler) UpdateBanner(c *fiber.Ctx) error {
 
 func (h *BannerHandler) DeleteBanner(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.db.Delete(&model.Banner{}, id).Error; err != nil {
+	if err := h.bannerService.DeleteBanner(id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Gagal menghapus banner"})
 	}
 

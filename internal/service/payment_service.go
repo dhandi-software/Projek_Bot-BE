@@ -1,12 +1,13 @@
 package service
 
 import (
-	"bytes"
 	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,11 +15,11 @@ import (
 	"bot_be/internal/model"
 	"bot_be/internal/wshub"
 
-	"github.com/go-pdf/fpdf"
 	"github.com/midtrans/midtrans-go"
 	"github.com/midtrans/midtrans-go/coreapi"
 	"github.com/midtrans/midtrans-go/snap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type CheckoutItemRequest struct {
@@ -26,6 +27,7 @@ type CheckoutItemRequest struct {
 	Quantity  int     `json:"quantity"`
 	Title     string  `json:"title"`
 	Price     float64 `json:"price"`
+	Image     string  `json:"image"`
 }
 
 type CheckoutCustomerRequest struct {
@@ -66,13 +68,15 @@ type PaymentService interface {
 }
 
 type paymentService struct {
-	cfg        *config.Config
-	db         *gorm.DB
-	snapClient snap.Client
-	coreClient coreapi.Client
+	cfg            *config.Config
+	db             *gorm.DB
+	snapClient     snap.Client
+	coreClient     coreapi.Client
+	orderService   OrderService
+	invoiceService InvoiceService
 }
 
-func NewPaymentService(cfg *config.Config, db *gorm.DB) PaymentService {
+func NewPaymentService(cfg *config.Config, db *gorm.DB, orderService OrderService, invoiceService InvoiceService) PaymentService {
 	var s snap.Client
 	var c coreapi.Client
 	env := midtrans.Sandbox
@@ -83,11 +87,20 @@ func NewPaymentService(cfg *config.Config, db *gorm.DB) PaymentService {
 	s.New(cfg.MidtransServerKey, env)
 	c.New(cfg.MidtransServerKey, env)
 
+	if orderService == nil {
+		orderService = NewOrderService(db)
+	}
+	if invoiceService == nil {
+		invoiceService = NewInvoiceService(db, orderService)
+	}
+
 	return &paymentService{
-		cfg:        cfg,
-		db:         db,
-		snapClient: s,
-		coreClient: c,
+		cfg:            cfg,
+		db:             db,
+		snapClient:     s,
+		coreClient:     c,
+		orderService:   orderService,
+		invoiceService: invoiceService,
 	}
 }
 
@@ -101,26 +114,7 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 		return nil, errors.New("keranjang belanja tidak boleh kosong")
 	}
 
-	var existingOrder model.Order
-	err := s.db.Where("idempotency_key = ?", req.IdempotencyKey).Preload("OrderItems").First(&existingOrder).Error
-	if err == nil {
-		return &CheckoutResponse{
-			OrderID:         existingOrder.OrderID,
-			SnapToken:       existingOrder.SnapToken,
-			SnapRedirectURL: existingOrder.SnapRedirectURL,
-			QRISURL:         existingOrder.QRISURL,
-			QRISString:      existingOrder.QRISString,
-			VANumber:        existingOrder.VANumber,
-			VABank:          existingOrder.VABank,
-			TotalAmount:     existingOrder.TotalAmount,
-			Status:          existingOrder.Status,
-			IsReused:        true,
-		}, nil
-	}
-
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("gagal mengecek idempotency key: %w", err)
-	}
+	paymentMethod := strings.ToLower(strings.TrimSpace(req.PaymentMethod))
 
 	productIDs := make([]uint, 0, len(req.Items))
 	for _, item := range req.Items {
@@ -134,7 +128,9 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 
 	var products []model.Product
 	if len(productIDs) > 0 {
-		_ = s.db.Where("id IN ?", productIDs).Find(&products).Error
+		if err := s.db.Where("id IN ?", productIDs).Find(&products).Error; err != nil {
+			return nil, fmt.Errorf("gagal mengambil data produk: %w", err)
+		}
 	}
 
 	productMap := make(map[uint]model.Product)
@@ -146,32 +142,49 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 	var orderItems []model.OrderItem
 	var midtransItems []midtrans.ItemDetails
 
+	orderID := fmt.Sprintf("ORDER-%d-%s", time.Now().UnixNano(), req.IdempotencyKey[:minInt(8, len(req.IdempotencyKey))])
+
 	for _, item := range req.Items {
 		qty := item.Quantity
-		prod, exists := productMap[item.ProductID]
 
 		var title string
 		var price float64
 		var prodID uint
 
-		if exists {
-			prodID = prod.ID
-			title = prod.Title
-			price = prod.Price
-			if prod.DiscountPrice > 0 && prod.DiscountPrice < prod.Price {
-				price = prod.DiscountPrice
-			}
-			if prod.Stock < qty {
-				return nil, fmt.Errorf("stok produk '%s' tidak mencukupi (tersedia: %d, diminta: %d)", prod.Title, prod.Stock, qty)
+		if item.ProductID > 0 {
+			prod, exists := productMap[item.ProductID]
+			if exists {
+				prodID = prod.ID
+				title = prod.Title
+				price = prod.Price
+				if prod.DiscountPrice > 0 && prod.DiscountPrice < prod.Price {
+					price = prod.DiscountPrice
+				}
+			} else {
+				var foundProd model.Product
+				if err := s.db.Where("LOWER(title) = ?", strings.ToLower(strings.TrimSpace(item.Title))).First(&foundProd).Error; err == nil {
+					prodID = foundProd.ID
+					title = foundProd.Title
+					price = foundProd.Price
+					if foundProd.DiscountPrice > 0 && foundProd.DiscountPrice < foundProd.Price {
+						price = foundProd.DiscountPrice
+					}
+				} else {
+					prodID = 0
+					title = strings.TrimSpace(item.Title)
+					if title == "" {
+						title = fmt.Sprintf("Produk #%d", item.ProductID)
+					}
+					price = item.Price
+					if price <= 0 {
+						price = 100000
+					}
+				}
 			}
 		} else {
-			prodID = item.ProductID
-			if prodID == 0 {
-				prodID = 1
-			}
 			title = strings.TrimSpace(item.Title)
 			if title == "" {
-				title = fmt.Sprintf("Produk #%d", prodID)
+				title = "Produk Dhandi Ecommerce"
 			}
 			price = item.Price
 			if price <= 0 {
@@ -179,14 +192,27 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 			}
 		}
 
+		var image string
+		if prodID > 0 {
+			if prod, exists := productMap[prodID]; exists {
+				image = prod.Image
+			}
+		}
+		if image == "" && item.Image != "" {
+			image = item.Image
+		}
+
 		itemTotal := price * float64(qty)
 		totalAmount += itemTotal
 
 		orderItems = append(orderItems, model.OrderItem{
+			OrderID:   orderID,
 			ProductID: prodID,
 			Title:     title,
 			Quantity:  qty,
 			Price:     price,
+			Image:     image,
+			ImageURL:  image,
 		})
 
 		midtransItems = append(midtransItems, midtrans.ItemDetails{
@@ -203,14 +229,109 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 	}
 	totalAmount = float64(itemsSum)
 
-	orderID := fmt.Sprintf("ORDER-%d-%s", time.Now().UnixNano(), req.IdempotencyKey[:minInt(8, len(req.IdempotencyKey))])
+	var existingOrder model.Order
+	err := s.db.Where("idempotency_key = ?", req.IdempotencyKey).Preload("OrderItems").First(&existingOrder).Error
+	if err == nil {
+		if math.Abs(existingOrder.TotalAmount-totalAmount) < 0.01 && len(existingOrder.OrderItems) == len(req.Items) {
+			if (paymentMethod == "bank" || paymentMethod == "va") && (existingOrder.VANumber == "" || (req.Bank != "" && !strings.EqualFold(existingOrder.VABank, req.Bank))) {
+				bankName := strings.ToLower(strings.TrimSpace(req.Bank))
+				if bankName == "" {
+					bankName = "bca"
+				}
+				bankReq := &coreapi.ChargeReq{
+					PaymentType: coreapi.PaymentTypeBankTransfer,
+					TransactionDetails: midtrans.TransactionDetails{
+						OrderID:  existingOrder.OrderID,
+						GrossAmt: int64(existingOrder.TotalAmount),
+					},
+					CustomerDetails: &midtrans.CustomerDetails{
+						FName: existingOrder.CustomerName,
+						Email: existingOrder.CustomerEmail,
+						Phone: existingOrder.CustomerPhone,
+					},
+					BankTransfer: &coreapi.BankTransferDetails{
+						Bank: midtrans.Bank(bankName),
+					},
+				}
+				coreResp, coreErr := s.coreClient.ChargeTransaction(bankReq)
+				if coreErr == nil && coreResp != nil && len(coreResp.VaNumbers) > 0 {
+					existingOrder.VANumber = coreResp.VaNumbers[0].VANumber
+					existingOrder.VABank = coreResp.VaNumbers[0].Bank
+					existingOrder.PaymentType = "bank"
+					s.db.Model(&existingOrder).Updates(map[string]interface{}{
+						"va_number":    existingOrder.VANumber,
+						"va_bank":      existingOrder.VABank,
+						"payment_type": "bank",
+					})
+				}
+			} else if (paymentMethod == "wallet" || paymentMethod == "qris" || paymentMethod == "") && existingOrder.QRISURL == "" {
+				qrisReq := &coreapi.ChargeReq{
+					PaymentType: coreapi.PaymentTypeQris,
+					TransactionDetails: midtrans.TransactionDetails{
+						OrderID:  existingOrder.OrderID,
+						GrossAmt: int64(existingOrder.TotalAmount),
+					},
+					CustomerDetails: &midtrans.CustomerDetails{
+						FName: existingOrder.CustomerName,
+						Email: existingOrder.CustomerEmail,
+						Phone: existingOrder.CustomerPhone,
+					},
+					Qris: &coreapi.QrisDetails{
+						Acquirer: "gopay",
+					},
+				}
+				coreResp, coreErr := s.coreClient.ChargeTransaction(qrisReq)
+				if coreErr == nil && coreResp != nil {
+					existingOrder.QRISString = coreResp.QRString
+					baseURL := "https://api.sandbox.midtrans.com"
+					if s.cfg.MidtransIsProduction {
+						baseURL = "https://api.midtrans.com"
+					}
+					if coreResp.TransactionID != "" {
+						existingOrder.QRISURL = fmt.Sprintf("%s/v2/qris/%s/qr-code", baseURL, coreResp.TransactionID)
+					}
+					if existingOrder.QRISURL == "" {
+						for _, act := range coreResp.Actions {
+							if act.Name == "generate-qr-code" {
+								existingOrder.QRISURL = act.URL
+								break
+							}
+						}
+					}
+					existingOrder.PaymentType = "wallet"
+					s.db.Model(&existingOrder).Updates(map[string]interface{}{
+						"qris_url":     existingOrder.QRISURL,
+						"qris_string":  existingOrder.QRISString,
+						"payment_type": "wallet",
+					})
+				}
+			}
+
+			return &CheckoutResponse{
+				OrderID:         existingOrder.OrderID,
+				SnapToken:       existingOrder.SnapToken,
+				SnapRedirectURL: existingOrder.SnapRedirectURL,
+				QRISURL:         existingOrder.QRISURL,
+				QRISString:      existingOrder.QRISString,
+				VANumber:        existingOrder.VANumber,
+				VABank:          existingOrder.VABank,
+				TotalAmount:     existingOrder.TotalAmount,
+				Status:          existingOrder.Status,
+				IsReused:        true,
+			}, nil
+		}
+	}
+
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("gagal mengecek idempotency key: %w", err)
+	}
 
 	var qrisURL string
 	var qrisString string
 	var vaNumber string
 	var vaBank string
 
-	paymentMethod := strings.ToLower(strings.TrimSpace(req.PaymentMethod))
+	paymentMethod = strings.ToLower(strings.TrimSpace(req.PaymentMethod))
 
 	if paymentMethod == "wallet" || paymentMethod == "qris" || paymentMethod == "" {
 		qrisReq := &coreapi.ChargeReq{
@@ -233,14 +354,20 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 		coreResp, coreErr := s.coreClient.ChargeTransaction(qrisReq)
 		if coreErr == nil && coreResp != nil {
 			qrisString = coreResp.QRString
-			for _, act := range coreResp.Actions {
-				if act.Name == "generate-qr-code" {
-					qrisURL = act.URL
-					break
-				}
+			baseURL := "https://api.sandbox.midtrans.com"
+			if s.cfg.MidtransIsProduction {
+				baseURL = "https://api.midtrans.com"
 			}
-			if qrisURL == "" && coreResp.TransactionID != "" {
-				qrisURL = fmt.Sprintf("https://api.sandbox.midtrans.com/v2/qris/%s/qr-code", coreResp.TransactionID)
+			if coreResp.TransactionID != "" {
+				qrisURL = fmt.Sprintf("%s/v2/qris/%s/qr-code", baseURL, coreResp.TransactionID)
+			}
+			if qrisURL == "" {
+				for _, act := range coreResp.Actions {
+					if act.Name == "generate-qr-code" {
+						qrisURL = act.URL
+						break
+					}
+				}
 			}
 		} else if coreErr != nil {
 			log.Printf("[MIDTRANS QRIS CHARGE WARNING] %v", coreErr)
@@ -268,9 +395,17 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 		}
 
 		coreResp, coreErr := s.coreClient.ChargeTransaction(bankReq)
-		if coreErr == nil && coreResp != nil && len(coreResp.VaNumbers) > 0 {
-			vaNumber = coreResp.VaNumbers[0].VANumber
-			vaBank = coreResp.VaNumbers[0].Bank
+		if coreErr == nil && coreResp != nil {
+			if len(coreResp.VaNumbers) > 0 {
+				vaNumber = coreResp.VaNumbers[0].VANumber
+				vaBank = coreResp.VaNumbers[0].Bank
+			} else if coreResp.BillKey != "" && coreResp.BillerCode != "" {
+				vaNumber = fmt.Sprintf("%s%s", coreResp.BillerCode, coreResp.BillKey)
+				vaBank = "mandiri"
+			} else if coreResp.PermataVaNumber != "" {
+				vaNumber = coreResp.PermataVaNumber
+				vaBank = "permata"
+			}
 		} else if coreErr != nil {
 			log.Printf("[MIDTRANS VA CHARGE WARNING] %v", coreErr)
 		}
@@ -325,7 +460,22 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 		tx.Rollback()
 		return nil, fmt.Errorf("gagal menyimpan order ke database: %w", err)
 	}
-	tx.Commit()
+
+	// Immediate stock deduction when product is purchased
+	for _, item := range orderItems {
+		if item.ProductID > 0 {
+			if err := tx.Model(&model.Product{}).
+				Where("id = ? AND stock >= ?", item.ProductID, item.Quantity).
+				UpdateColumn("stock", gorm.Expr("stock - ?", item.Quantity)).Error; err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("stok produk ID %d tidak mencukupi untuk dibeli", item.ProductID)
+			}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, fmt.Errorf("gagal commit order: %w", err)
+	}
 
 	return &CheckoutResponse{
 		OrderID:         orderID,
@@ -343,7 +493,6 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 
 func (s *paymentService) HandleNotification(payload map[string]interface{}) error {
 	orderID, _ := payload["order_id"].(string)
-	transactionID, _ := payload["transaction_id"].(string)
 	statusCode, _ := payload["status_code"].(string)
 	grossAmountStr, _ := payload["gross_amount"].(string)
 	signatureKey, _ := payload["signature_key"].(string)
@@ -351,18 +500,13 @@ func (s *paymentService) HandleNotification(payload map[string]interface{}) erro
 	fraudStatus, _ := payload["fraud_status"].(string)
 	paymentType, _ := payload["payment_type"].(string)
 
-	log.Printf("[MIDTRANS] notification received")
-	log.Printf("[MIDTRANS] order_id: %s | transaction_id: %s | transaction_status: %s | status_code: %s | gross_amount: %s",
-		orderID, transactionID, transactionStatus, statusCode, grossAmountStr)
+	log.Printf("[MIDTRANS NOTIFICATION] order_id: %s | status: %s", orderID, transactionStatus)
 
-	// Midtrans Dashboard Test Ping or empty test payload handler
 	if orderID == "" || strings.HasPrefix(strings.ToLower(orderID), "test") || strings.Contains(strings.ToLower(orderID), "dummy") {
-		log.Printf("[MIDTRANS] Notifikasi tes Midtrans diterima (order_id: %s)", orderID)
 		return nil
 	}
 
 	if statusCode == "" || grossAmountStr == "" || signatureKey == "" {
-		log.Printf("[MIDTRANS] Notifikasi Midtrans parsial/tes diterima (order_id: %s)", orderID)
 		return nil
 	}
 
@@ -372,20 +516,35 @@ func (s *paymentService) HandleNotification(payload map[string]interface{}) erro
 	expectedSignature := hex.EncodeToString(hasher.Sum(nil))
 
 	if !strings.EqualFold(signatureKey, expectedSignature) {
-		log.Printf("[MIDTRANS] WARNING: Signature key mismatch untuk order_id: %s", orderID)
-		return nil
+		log.Printf("[MIDTRANS SECURITY] Signature key mismatch untuk order_id: %s", orderID)
+		return errors.New("invalid signature key")
 	}
+
+	tx := s.db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
 
 	var order model.Order
-	if err := s.db.Where("order_id = ?", orderID).Preload("OrderItems").First(&order).Error; err != nil {
-		log.Printf("[MIDTRANS] ERROR: order_id %s tidak ditemukan di database: %v", orderID, err)
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("order_id = ?", orderID).Preload("OrderItems").First(&order).Error; err != nil {
+		tx.Rollback()
+		log.Printf("[MIDTRANS ERROR] order_id %s tidak ditemukan: %v", orderID, err)
 		return nil
 	}
 
-	log.Printf("[ORDER] matched internal order: ID=%d, OrderID=%s, CurrentStatus=%s", order.ID, order.OrderID, order.Status)
+	if grossAmt, parseErr := strconv.ParseFloat(grossAmountStr, 64); parseErr == nil {
+		if grossAmt != order.TotalAmount {
+			tx.Rollback()
+			log.Printf("[MIDTRANS SECURITY] Gross amount mismatch untuk order_id %s (diterima: %.2f, expected: %.2f)", orderID, grossAmt, order.TotalAmount)
+			return errors.New("gross amount mismatch")
+		}
+	}
 
 	if order.Status == "paid" || order.Status == "settlement" {
-		log.Printf("[MIDTRANS] Notifikasi diabaikan (Idempotent): order_id %s sudah berstatus '%s'", orderID, order.Status)
+		tx.Rollback()
+		log.Printf("[MIDTRANS IDEMPOTENT] order_id %s sudah berstatus '%s'", orderID, order.Status)
 		return nil
 	}
 
@@ -409,8 +568,6 @@ func (s *paymentService) HandleNotification(payload map[string]interface{}) erro
 		newStatus = "pending"
 	}
 
-	tx := s.db.Begin()
-
 	now := time.Now()
 	updateFields := map[string]interface{}{
 		"status":       newStatus,
@@ -421,36 +578,37 @@ func (s *paymentService) HandleNotification(payload map[string]interface{}) erro
 		updateFields["paid_at"] = &now
 
 		for _, item := range order.OrderItems {
-			if err := tx.Model(&model.Product{}).
-				Where("id = ? AND stock >= ?", item.ProductID, item.Quantity).
-				UpdateColumn("stock", gorm.Expr("stock - ?", item.Quantity)).Error; err != nil {
-				tx.Rollback()
-				log.Printf("[PAYMENT] ERROR: Gagal mengurangi stok produk ID %d: %v", item.ProductID, err)
-				return fmt.Errorf("gagal mengurangi stok produk ID %d: %w", item.ProductID, err)
+			if item.ProductID > 0 {
+				if err := tx.Model(&model.Product{}).
+					Where("id = ? AND stock >= ?", item.ProductID, item.Quantity).
+					UpdateColumn("stock", gorm.Expr("stock - ?", item.Quantity)).Error; err != nil {
+					tx.Rollback()
+					log.Printf("[PAYMENT ERROR] Gagal mengurangi stok produk ID %d: %v", item.ProductID, err)
+					return fmt.Errorf("gagal mengurangi stok produk ID %d: %w", item.ProductID, err)
+				}
 			}
 		}
 	}
 
 	if err := tx.Model(&model.Order{}).Where("order_id = ?", orderID).Updates(updateFields).Error; err != nil {
 		tx.Rollback()
-		log.Printf("[PAYMENT] ERROR: Gagal mengupdate status database untuk order_id %s: %v", orderID, err)
+		log.Printf("[PAYMENT ERROR] Gagal mengupdate status database order_id %s: %v", orderID, err)
 		return fmt.Errorf("gagal mengupdate status order: %w", err)
 	}
 
-	logMsg := fmt.Sprintf("Order %s berubah status menjadi %s via %s", orderID, newStatus, paymentType)
 	activity := model.ActivityLog{
 		Type:        "PAYMENT_UPDATE",
 		Sender:      "SYSTEM",
-		Description: logMsg,
+		Description: fmt.Sprintf("Order %s berubah status menjadi %s via %s", orderID, newStatus, paymentType),
 	}
 	_ = tx.Create(&activity).Error
 
 	if err := tx.Commit().Error; err != nil {
-		log.Printf("[PAYMENT] ERROR: Gagal commit transaksi database: %v", err)
+		log.Printf("[PAYMENT ERROR] Gagal commit transaksi database: %v", err)
 		return err
 	}
 
-	log.Printf("[PAYMENT] status updated: order_id=%s, new_status=%s", orderID, newStatus)
+	log.Printf("[PAYMENT SUCCESS] Status order_id=%s diperbarui menjadi %s", orderID, newStatus)
 
 	wshub.BroadcastMessage(map[string]interface{}{
 		"event":        "payment_status_updated",
@@ -464,121 +622,13 @@ func (s *paymentService) HandleNotification(payload map[string]interface{}) erro
 }
 
 func (s *paymentService) GetOrders() ([]model.Order, error) {
-	var orders []model.Order
-	err := s.db.Preload("OrderItems").Order("created_at desc").Find(&orders).Error
-	return orders, err
+	return s.orderService.GetOrders()
 }
 
 func (s *paymentService) GetOrderByID(orderID string) (*model.Order, error) {
-	var order model.Order
-	err := s.db.Where("order_id = ?", orderID).Preload("OrderItems").First(&order).Error
-	if err != nil {
-		return nil, err
-	}
-	return &order, nil
+	return s.orderService.GetOrderByID(orderID)
 }
 
 func (s *paymentService) GenerateInvoicePDF(orderID string) ([]byte, error) {
-	order, err := s.GetOrderByID(orderID)
-	if err != nil {
-		return nil, fmt.Errorf("order tidak ditemukan: %w", err)
-	}
-
-	pdf := fpdf.New("P", "mm", "A4", "")
-	pdf.AddPage()
-
-	pdf.SetFillColor(27, 99, 146)
-	pdf.Rect(0, 0, 210, 30, "F")
-
-	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont("Arial", "B", 16)
-	pdf.Text(14, 18, "DHANDI ECOMMERCE")
-	pdf.SetFont("Arial", "", 10)
-	pdf.Text(140, 18, "INVOICE PEMBAYARAN RESMI")
-
-	pdf.SetTextColor(30, 30, 30)
-	pdf.SetFont("Arial", "B", 11)
-	pdf.Text(14, 42, "Rincian Pesanan & Pembayaran:")
-
-	pdf.SetFont("Arial", "", 9)
-	pdf.Text(14, 50, fmt.Sprintf("Nomor Pesanan (Order ID): %s", order.OrderID))
-	pdf.Text(14, 56, fmt.Sprintf("Tanggal: %s", order.CreatedAt.Format("02 January 2006 15:04 WIB")))
-	pdf.Text(14, 62, fmt.Sprintf("Status Pembayaran: %s", strings.ToUpper(order.Status)))
-	paymentTypeDisplay := order.PaymentType
-	if paymentTypeDisplay == "" {
-		paymentTypeDisplay = "QRIS / VA"
-	}
-	pdf.Text(14, 68, fmt.Sprintf("Metode Pembayaran: Midtrans (%s)", paymentTypeDisplay))
-
-	custName := order.CustomerName
-	if custName == "" {
-		custName = "Customer"
-	}
-	custEmail := order.CustomerEmail
-	if custEmail == "" {
-		custEmail = "-"
-	}
-	custPhone := order.CustomerPhone
-	if custPhone == "" {
-		custPhone = "-"
-	}
-	custAddress := order.ShippingAddress
-	if custAddress == "" {
-		custAddress = "Indonesia"
-	}
-
-	pdf.Text(120, 50, fmt.Sprintf("Nama Pembeli: %s", custName))
-	pdf.Text(120, 56, fmt.Sprintf("Email: %s", custEmail))
-	pdf.Text(120, 62, fmt.Sprintf("No. Telepon: %s", custPhone))
-	pdf.Text(120, 68, fmt.Sprintf("Alamat: %s", truncateString(custAddress, 35)))
-
-	pdf.SetY(78)
-	pdf.SetFont("Arial", "B", 9)
-	pdf.SetFillColor(45, 165, 243)
-	pdf.SetTextColor(255, 255, 255)
-
-	pdf.CellFormat(90, 8, " Nama Produk", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(20, 8, " Qty", "1", 0, "C", true, 0, "")
-	pdf.CellFormat(36, 8, " Harga Satuan", "1", 0, "R", true, 0, "")
-	pdf.CellFormat(36, 8, " Total", "1", 1, "R", true, 0, "")
-
-	pdf.SetFont("Arial", "", 9)
-	pdf.SetTextColor(30, 30, 30)
-
-	for _, item := range order.OrderItems {
-		pdf.CellFormat(90, 8, fmt.Sprintf(" %s", truncateString(item.Title, 45)), "1", 0, "L", false, 0, "")
-		pdf.CellFormat(20, 8, fmt.Sprintf("%d ", item.Quantity), "1", 0, "C", false, 0, "")
-		pdf.CellFormat(36, 8, fmt.Sprintf("Rp %.0f ", item.Price), "1", 0, "R", false, 0, "")
-		pdf.CellFormat(36, 8, fmt.Sprintf("Rp %.0f ", item.Price*float64(item.Quantity)), "1", 1, "R", false, 0, "")
-	}
-
-	pdf.SetFont("Arial", "B", 10)
-	pdf.CellFormat(146, 8, "Total Pembayaran: ", "1", 0, "R", false, 0, "")
-	pdf.CellFormat(36, 8, fmt.Sprintf("Rp %.0f ", order.TotalAmount), "1", 1, "R", false, 0, "")
-
-	var buf bytes.Buffer
-	err = pdf.Output(&buf)
-	if err != nil {
-		return nil, fmt.Errorf("gagal merender PDF: %w", err)
-	}
-
-	return buf.Bytes(), nil
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func truncateString(s string, maxLen int) string {
-	runes := []rune(strings.TrimSpace(s))
-	if len(runes) <= maxLen {
-		return string(runes)
-	}
-	if maxLen <= 3 {
-		return string(runes[:maxLen])
-	}
-	return string(runes[:maxLen-3]) + "..."
+	return s.invoiceService.GenerateInvoicePDF(orderID)
 }

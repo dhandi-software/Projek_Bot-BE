@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"log"
 	"strings"
 
@@ -18,13 +19,32 @@ func NewPaymentHandler(paymentService service.PaymentService) *PaymentHandler {
 }
 
 func (h *PaymentHandler) CreateCheckoutTransaction(c *fiber.Ctx) error {
-	var req service.CreateCheckoutRequest
-	if err := c.BodyParser(&req); err != nil {
+	var bodyMap map[string]interface{}
+	if err := c.BodyParser(&bodyMap); err != nil {
 		log.Printf("[Checkout Error] Body parser failed: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Format request tidak valid",
 		})
 	}
+
+	// Smart check: If Midtrans sends a Notification Webhook Callback directly to /payment/checkout
+	if _, hasSig := bodyMap["signature_key"]; hasSig || bodyMap["transaction_status"] != nil || bodyMap["order_id"] != nil && bodyMap["items"] == nil {
+		log.Printf("[Checkout Webhook] Midtrans callback detected on /payment/checkout")
+		if err := h.paymentService.HandleNotification(bodyMap); err != nil {
+			log.Printf("[Checkout Webhook Warning] HandleNotification error: %v", err)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": err.Error(),
+			})
+		}
+		return c.JSON(fiber.Map{
+			"status":  "ok",
+			"message": "Notifikasi berhasil diproses",
+		})
+	}
+
+	var req service.CreateCheckoutRequest
+	reqBytes, _ := json.Marshal(bodyMap)
+	_ = json.Unmarshal(reqBytes, &req)
 
 	if req.IdempotencyKey == "" {
 		req.IdempotencyKey = strings.TrimSpace(c.Get("Idempotency-Key"))
@@ -38,7 +58,7 @@ func (h *PaymentHandler) CreateCheckoutTransaction(c *fiber.Ctx) error {
 		})
 	}
 
-	log.Printf("[Checkout Success] OrderID: %s, SnapToken: %s", resp.OrderID, resp.SnapToken)
+	log.Printf("[Checkout Success] OrderID: %s", resp.OrderID)
 
 	return c.JSON(fiber.Map{
 		"message": "Transaksi berhasil dibuat",
@@ -55,10 +75,8 @@ func (h *PaymentHandler) HandleNotification(c *fiber.Ctx) error {
 		})
 	}
 
-	log.Printf("[Notification Incoming] Payload: %v", payload)
-
 	if err := h.paymentService.HandleNotification(payload); err != nil {
-		log.Printf("[Notification Warning] HandleNotification: %v", err)
+		log.Printf("[Notification Warning] HandleNotification error: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": err.Error(),
 		})
@@ -68,58 +86,4 @@ func (h *PaymentHandler) HandleNotification(c *fiber.Ctx) error {
 		"status":  "ok",
 		"message": "Notifikasi berhasil diproses",
 	})
-}
-
-func (h *PaymentHandler) GetOrders(c *fiber.Ctx) error {
-	orders, err := h.paymentService.GetOrders()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Gagal mengambil daftar order",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"data": orders,
-	})
-}
-
-func (h *PaymentHandler) GetOrderByID(c *fiber.Ctx) error {
-	orderID := c.Params("id")
-	if orderID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Order ID wajib diisi",
-		})
-	}
-
-	order, err := h.paymentService.GetOrderByID(orderID)
-	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "Order tidak ditemukan",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"data": order,
-	})
-}
-
-func (h *PaymentHandler) GetOrderInvoice(c *fiber.Ctx) error {
-	orderID := c.Params("id")
-	if orderID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Order ID wajib diisi",
-		})
-	}
-
-	pdfBytes, err := h.paymentService.GenerateInvoicePDF(orderID)
-	if err != nil {
-		log.Printf("[Invoice Error] %v", err)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "Invoice tidak ditemukan atau gagal diproses",
-		})
-	}
-
-	c.Set("Content-Type", "application/pdf")
-	c.Set("Content-Disposition", "attachment; filename=\"Invoice_"+orderID+".pdf\"")
-	return c.Send(pdfBytes)
 }

@@ -41,8 +41,7 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 	db.Exec("UPDATE products SET brand = '' WHERE brand IS NULL")
 	db.Exec("UPDATE products SET description = '' WHERE description IS NULL")
 	db.Exec("UPDATE products SET image = '' WHERE image IS NULL")
-	db.Exec("UPDATE products SET image = 'https://images.unsplash.com/photo-1593508512255-86ab42a8e620?auto=format&fit=crop&w=600&q=80' WHERE LOWER(title) LIKE '%vr2%' OR LOWER(title) LIKE '%playstation vr%' OR image LIKE '%photo-1622979135225%'")
-	db.Exec("UPDATE products SET image = 'https://images.unsplash.com/photo-1620799140408-edc6dcb6d633?auto=format&fit=crop&w=600&q=80' WHERE LOWER(title) LIKE '%anker%' OR image LIKE '%photo-1609592424109%'")
+	db.Exec("UPDATE products SET best_deal_started_at = NOW(), best_deal_expires_at = NOW() + INTERVAL '6 hours' WHERE is_best_deal = true AND (best_deal_expires_at > NOW() + INTERVAL '24 hours' OR best_deal_expires_at IS NULL)")
 
 	db.Exec("ALTER TABLE products ALTER COLUMN name DROP NOT NULL")
 	db.Exec("ALTER TABLE products ALTER COLUMN title DROP NOT NULL")
@@ -141,8 +140,14 @@ func seedCustomer(db *gorm.DB) {
 }
 
 func seedProducts(db *gorm.DB) {
+	var count int64
+	db.Model(&model.Product{}).Count(&count)
+	if count > 0 {
+		return
+	}
+
 	now := time.Now()
-	expires := now.Add(72 * time.Hour)
+	expires := now.Add(6 * time.Hour)
 
 	products := []model.Product{
 		{

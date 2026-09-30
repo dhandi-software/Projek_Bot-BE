@@ -41,4 +41,6 @@ type OrderItem struct {
 	Title     string  `gorm:"type:varchar(255);not null" json:"title"`
 	Quantity  int     `gorm:"not null" json:"quantity"`
 	Price     float64 `gorm:"type:numeric(15,2);not null" json:"price"`
+	Image     string  `gorm:"type:text;default:''" json:"image"`
+	ImageURL  string  `gorm:"type:text;default:''" json:"image_url"`
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bot_be/internal/model"
+	"bot_be/internal/service"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
@@ -9,11 +10,15 @@ import (
 )
 
 type CustomerHandler struct {
-	DB *gorm.DB
+	customerService service.CustomerService
+	DB              *gorm.DB
 }
 
-func NewCustomerHandler(db *gorm.DB) *CustomerHandler {
-	return &CustomerHandler{DB: db}
+func NewCustomerHandler(customerService service.CustomerService, db *gorm.DB) *CustomerHandler {
+	return &CustomerHandler{
+		customerService: customerService,
+		DB:              db,
+	}
 }
 
 type CustomerRegisterRequest struct {
@@ -55,34 +60,18 @@ func (h *CustomerHandler) RegisterCustomer(c *fiber.Ctx) error {
 		})
 	}
 
-	// Cek apakah email sudah terdaftar
-	var existing model.Customer
-	if err := h.DB.Where("email = ?", req.Email).First(&existing).Error; err == nil {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"error": "Email sudah terdaftar. Silakan login.",
-		})
-	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Gagal memproses password",
-		})
-	}
-
 	customer := model.Customer{
-		Name:     req.Name,
-		Email:    req.Email,
-		Phone:    req.Phone,
-		Password: string(hashedPassword),
-		Address:  req.Address,
-		Bio:      req.Bio,
-		Photo:    req.Photo,
+		Name:    req.Name,
+		Email:   req.Email,
+		Phone:   req.Phone,
+		Address: req.Address,
+		Bio:     req.Bio,
+		Photo:   req.Photo,
 	}
 
-	if err := h.DB.Create(&customer).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Gagal menyimpan akun customer",
+	if err := h.customerService.RegisterCustomer(&customer, req.Password); err != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error": err.Error(),
 		})
 	}
 
@@ -90,14 +79,14 @@ func (h *CustomerHandler) RegisterCustomer(c *fiber.Ctx) error {
 		"message": "Pendaftaran akun customer berhasil",
 		"token":   "customer-jwt-token-demo",
 		"user": fiber.Map{
-			"id":       customer.ID,
-			"name":     customer.Name,
-			"email":    customer.Email,
-			"phone":    customer.Phone,
-			"address":  customer.Address,
-			"bio":      customer.Bio,
-			"photo":    customer.Photo,
-			"role":     "customer",
+			"id":      customer.ID,
+			"name":    customer.Name,
+			"email":   customer.Email,
+			"phone":   customer.Phone,
+			"address": customer.Address,
+			"bio":     customer.Bio,
+			"photo":   customer.Photo,
+			"role":    "customer",
 		},
 	})
 }
@@ -111,8 +100,8 @@ func (h *CustomerHandler) LoginCustomer(c *fiber.Ctx) error {
 		})
 	}
 
-	var customer model.Customer
-	if err := h.DB.Where("email = ? OR phone = ?", req.Email, req.Email).First(&customer).Error; err != nil {
+	customer, err := h.customerService.GetCustomerByEmail(req.Email)
+	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "Email/Nomor HP atau password salah",
 		})
@@ -128,14 +117,14 @@ func (h *CustomerHandler) LoginCustomer(c *fiber.Ctx) error {
 		"message": "Login customer berhasil",
 		"token":   "customer-jwt-token-demo",
 		"user": fiber.Map{
-			"id":       customer.ID,
-			"name":     customer.Name,
-			"email":    customer.Email,
-			"phone":    customer.Phone,
-			"address":  customer.Address,
-			"bio":      customer.Bio,
-			"photo":    customer.Photo,
-			"role":     "customer",
+			"id":      customer.ID,
+			"name":    customer.Name,
+			"email":   customer.Email,
+			"phone":   customer.Phone,
+			"address": customer.Address,
+			"bio":     customer.Bio,
+			"photo":   customer.Photo,
+			"role":    "customer",
 		},
 	})
 }
@@ -147,8 +136,8 @@ func (h *CustomerHandler) GetCustomerProfile(c *fiber.Ctx) error {
 		email = "user@example.com"
 	}
 
-	var customer model.Customer
-	if err := h.DB.Where("email = ?", email).First(&customer).Error; err != nil {
+	customer, err := h.customerService.GetCustomerByEmail(email)
+	if err != nil {
 		return c.JSON(fiber.Map{
 			"message": "Berhasil mendapatkan profil customer",
 			"user": fiber.Map{
@@ -193,10 +182,9 @@ func (h *CustomerHandler) UpdateCustomerProfile(c *fiber.Ctx) error {
 		})
 	}
 
-	var customer model.Customer
-	if err := h.DB.Where("email = ?", req.Email).First(&customer).Error; err != nil {
-		// Jika belum ada di DB, buat baru
-		customer = model.Customer{
+	customer, err := h.customerService.GetCustomerByEmail(req.Email)
+	if err != nil {
+		newCust := model.Customer{
 			Name:    req.Name,
 			Email:   req.Email,
 			Phone:   req.Phone,
@@ -204,31 +192,30 @@ func (h *CustomerHandler) UpdateCustomerProfile(c *fiber.Ctx) error {
 			Bio:     req.Bio,
 			Photo:   req.Photo,
 		}
-		if err := h.DB.Create(&customer).Error; err != nil {
+		if err := h.customerService.RegisterCustomer(&newCust, "defaultPass123"); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Gagal menyimpan profil customer baru",
 			})
 		}
+		customer = &newCust
 	} else {
-		// Update data terdaftar
-		updates := map[string]interface{}{}
 		if req.Name != "" {
-			updates["name"] = req.Name
+			customer.Name = req.Name
 		}
 		if req.Phone != "" {
-			updates["phone"] = req.Phone
+			customer.Phone = req.Phone
 		}
 		if req.Address != "" {
-			updates["address"] = req.Address
+			customer.Address = req.Address
 		}
 		if req.Bio != "" {
-			updates["bio"] = req.Bio
+			customer.Bio = req.Bio
 		}
 		if req.Photo != "" {
-			updates["photo"] = req.Photo
+			customer.Photo = req.Photo
 		}
 
-		if err := h.DB.Model(&customer).Updates(updates).Error; err != nil {
+		if err := h.customerService.UpdateCustomer(customer); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Gagal mengupdate profil customer",
 			})
@@ -252,8 +239,8 @@ func (h *CustomerHandler) UpdateCustomerProfile(c *fiber.Ctx) error {
 
 // GetAdminCustomers mengembalikan daftar customer untuk admin
 func (h *CustomerHandler) GetAdminCustomers(c *fiber.Ctx) error {
-	var customers []model.Customer
-	if err := h.DB.Find(&customers).Error; err != nil {
+	customers, err := h.customerService.GetAllCustomers()
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Gagal mengambil data customer",
 		})
@@ -264,14 +251,14 @@ func (h *CustomerHandler) GetAdminCustomers(c *fiber.Ctx) error {
 	})
 }
 
-// GetDashboardStats mengembalikan statistik dashboard admin (Figma design node 78:15427)
+// GetDashboardStats mengembalikan statistik dashboard admin
 func (h *CustomerHandler) GetDashboardStats(c *fiber.Ctx) error {
 	stats := fiber.Map{
 		"omset": fiber.Map{
-			"amount":      "Rp 91,2 jt",
-			"change":      "+18.4%",
-			"isPositive":  true,
-			"comparison":  "vs Sep 2025: Rp 76,9 jt",
+			"amount":     "Rp 91,2 jt",
+			"change":     "+18.4%",
+			"isPositive": true,
+			"comparison": "vs Sep 2025: Rp 76,9 jt",
 		},
 		"totalOrder": fiber.Map{
 			"count":      643,
@@ -325,36 +312,74 @@ func (h *CustomerHandler) GetDashboardStats(c *fiber.Ctx) error {
 		},
 		"latestOrders": []fiber.Map{
 			{
-				"id": "ORD-9021",
+				"id":       "ORD-9021",
 				"customer": "Budi Santoso",
-				"items": "Headphone Pro X1 ×2",
-				"total": "Rp 398k",
-				"time": "5 mnt yang lalu",
-				"status": "Selesai",
+				"items":    "Headphone Pro X1 ×2",
+				"total":    "Rp 398k",
+				"time":     "5 mnt yang lalu",
+				"status":   "Selesai",
 			},
 			{
-				"id": "ORD-9020",
+				"id":       "ORD-9020",
 				"customer": "Siti Rahma",
-				"items": "Smartwatch Sport V2 ×1",
-				"total": "Rp 549k",
-				"time": "18 mnt yang lalu",
-				"status": "Diproses",
+				"items":    "Smartwatch Sport V2 ×1",
+				"total":    "Rp 549k",
+				"time":     "18 mnt yang lalu",
+				"status":   "Diproses",
 			},
 			{
-				"id": "ORD-9019",
+				"id":       "ORD-9019",
 				"customer": "Andi Wijaya",
-				"items": "Keyboard Mechanical RGB ×1",
-				"total": "Rp 720k",
-				"time": "42 mnt yang lalu",
-				"status": "Selesai",
+				"items":    "Keyboard Mechanical RGB ×1",
+				"total":    "Rp 720k",
+				"time":     "42 mnt yang lalu",
+				"status":   "Selesai",
 			},
 			{
-				"id": "ORD-9018",
+				"id":       "ORD-9018",
 				"customer": "Dewi Lestari",
-				"items": "Mouse Wireless Silent ×3",
-				"total": "Rp 285k",
-				"time": "1 jam yang lalu",
-				"status": "Selesai",
+				"items":    "Mouse Wireless Silent ×3",
+				"total":    "Rp 285k",
+				"time":     "1 jam yang lalu",
+				"status":   "Selesai",
+			},
+		},
+		"produkKeluar": []fiber.Map{
+			{
+				"id":            "PK-001",
+				"title":         "Sony PlayStation VR2 Headset",
+				"soldQty":       42,
+				"totalAmount":   "Rp 356.958.000",
+				"lastOrderDate": "Hari ini, 23:37",
+				"status":        "Terjual & Stok Berkurang",
+				"image":         "https://images.unsplash.com/photo-1593508512255-86ab42a8e620?w=100&q=80",
+			},
+			{
+				"id":            "PK-002",
+				"title":         "Razer DeathAdder V3 Pro",
+				"soldQty":       28,
+				"totalAmount":   "Rp 53.172.000",
+				"lastOrderDate": "Hari ini, 12:47",
+				"status":        "Terjual & Stok Berkurang",
+				"image":         "https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?w=100&q=80",
+			},
+			{
+				"id":            "PK-003",
+				"title":         "Valve Steam Deck OLED 512GB",
+				"soldQty":       19,
+				"totalAmount":   "Rp 167.181.000",
+				"lastOrderDate": "Kemarin, 22:26",
+				"status":        "Terjual & Stok Berkurang",
+				"image":         "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=100&q=80",
+			},
+			{
+				"id":            "PK-004",
+				"title":         "Anker 737 Power Bank 24000mAh",
+				"soldQty":       35,
+				"totalAmount":   "Rp 62.965.000",
+				"lastOrderDate": "Kemarin, 22:19",
+				"status":        "Terjual & Stok Berkurang",
+				"image":         "https://images.unsplash.com/photo-1609592424109-dd9892f1b177?w=100&q=80",
 			},
 		},
 	}

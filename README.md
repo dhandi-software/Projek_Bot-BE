@@ -201,25 +201,100 @@ type Category struct {
 
 | Method | Endpoint | Deskripsi |
 | :--- | :--- | :--- |
-| `POST` | `/api/payment/checkout` | Membuat transaksi Snap token Midtrans dengan proteksi Idempotency Key |
-| `POST` | `/api/payment/notification` | Webhook penampung notifikasi dari Midtrans (Verifikasi Signature SHA512) |
+| `POST` | `/api/payment/checkout` | Membuat transaksi Snap / QRIS / Virtual Account Midtrans & Penampung Webhook Callback Notifikasi (Idempotency Key & Signature Verification) |
+| `POST` | `/api/payment/notification` | (Backward Compatibility) Webhook callback alternatif dari Midtrans |
 | `GET` | `/api/orders` | Mengambil seluruh riwayat transaksi order |
 | `GET` | `/api/orders/:id` | Mengambil detail order berdasarkan `order_id` |
+| `GET` | `/api/orders/:id/invoice` | Mengunduh file Invoice Pembayaran Resmi dalam format PDF (`application/pdf`) |
+
+#### Contoh Payload Checkout Request (`POST /api/payment/checkout`)
+```json
+{
+  "idempotency_key": "IDEM-1727438100-XYZ",
+  "payment_method": "qris",
+  "bank": "bca",
+  "customer": {
+    "customer_id": 1,
+    "name": "Budi Santoso",
+    "email": "budi@example.com",
+    "phone": "081234567890",
+    "address": "Jl. Sudirman No. 45, Jakarta"
+  },
+  "items": [
+    {
+      "product_id": 2,
+      "quantity": 1,
+      "title": "Sony PlayStation VR2 Headset",
+      "price": 8499000,
+      "image": "https://images.unsplash.com/photo-1622979135225-d2ba269bc1bd"
+    }
+  ]
+}
+```
+
+#### Contoh Response Checkout Success (`200 OK`)
+```json
+{
+  "message": "Transaksi berhasil dibuat",
+  "data": {
+    "order_id": "ORDER-1727438100123-IDEM-172",
+    "snap_token": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+    "snap_redirect_url": "https://app.sandbox.midtrans.com/snap/v2/vtweb/a1b2c3d4",
+    "qris_url": "https://api.sandbox.midtrans.com/v2/qris/391038100123/qr-code",
+    "qris_string": "00020101021226680016ID.CO.QRIS.WWW...",
+    "va_number": "12345678901",
+    "va_bank": "bca",
+    "total_amount": 8499000,
+    "status": "pending",
+    "is_reused": false
+  }
+}
+```
+
+#### Contoh Response Detail Order (`GET /api/orders/:id`)
+```json
+{
+  "status": "success",
+  "data": {
+    "id": 15,
+    "order_id": "ORDER-1727438100123-IDEM-172",
+    "customer_name": "Budi Santoso",
+    "customer_email": "budi@example.com",
+    "customer_phone": "081234567890",
+    "customer_address": "Jl. Sudirman No. 45, Jakarta",
+    "total_amount": 8499000,
+    "payment_method": "qris",
+    "status": "paid",
+    "items": [
+      {
+        "id": 28,
+        "order_id": "ORDER-1727438100123-IDEM-172",
+        "product_id": 2,
+        "title": "Sony PlayStation VR2 Headset",
+        "quantity": 1,
+        "price": 8499000,
+        "subtotal": 8499000,
+        "image": "https://images.unsplash.com/photo-1622979135225-d2ba269bc1bd",
+        "image_url": "https://images.unsplash.com/photo-1622979135225-d2ba269bc1bd"
+      }
+    ],
+    "created_at": "2026-09-27T22:00:00+07:00"
+  }
+}
+```
 
 ---
 
 ## 🔒 Proteksi Keamanan & Idempotency Key
 
-### 🛡️ Proteksi SQL Injection
-Seluruh layer database menggunakan ORM **GORM** dengan **Parameterized Prepared Queries** (`db.Where("column = ?", value)`). Tidak ada string concatenation pada query database untuk mencegah serangan SQL Injection secara total.
+### 🛡️ Proteksi SQL Injection & Data Sanitization
+Seluruh layer database menggunakan ORM **GORM** dengan **Parameterized Prepared Queries** (`db.Where("column = ?", value)`). Tidak ada string concatenation pada query database untuk mencegah serangan SQL Injection secara total. Log server disanitasi sehingga tidak membocorkan `ServerKey`, `SnapToken`, `signature_key`, atau kredensial sensitif lainnya.
 
-### 🔄 Pembayaran Idempotent (Anti Sinyal Buruk / Double Charge)
-Untuk mengantisipasi masalah koneksi internet buruk atau penekanan tombol bayar berkali-kali:
-1. Client mengirimkan `idempotency_key` pada request checkout (bisa via JSON body atau HTTP Header `Idempotency-Key`).
-2. Backend mengecek ketersediaan `idempotency_key` di database:
-   - Jika key sudah terdaftar, backend **langsung mengembalikan token & URL transaksi yang sama** tanpa membuat invoice/charge baru ke Midtrans.
-   - Jika key belum ada, backend memproses pesanan baru dan memanggil API Midtrans Snap.
-3. Webhook callback dari Midtrans juga diproses secara idempotent. Jika status order sudah `paid`, notifikasi duplikat akan diabaikan secara aman.
+### 🔄 Pembayaran Idempotent & Race Condition Protection
+1. **At-Least-Once Webhook Protection**: Notifikasi Midtrans diproses di dalam transaksi database berbasis row-level locking (`clause.Locking{Strength: "UPDATE"}`).
+2. **Amount & State Transition Guard**: Backend memverifikasi `gross_amount` callback sesuai nilai transaksi database dan menolak rollback status jika transaksi sudah `paid`/`settlement`.
+3. **Validasi Produk Real-Time**: Seluruh harga dan ketersediaan stok diambil langsung dari database internal. Backend menolak jika harga atau stok tidak valid.
+4. **Idempotency Key Request**: Jika client mengirim `idempotency_key` yang sama, backend langsung mengembalikan invoice/token yang sudah dibuat tanpa membuat transaksi ganda di Midtrans.
 
 ---
 
