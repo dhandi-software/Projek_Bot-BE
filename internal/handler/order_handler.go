@@ -47,3 +47,24 @@ func (h *OrderHandler) GetOrderByID(c *fiber.Ctx) error {
 		"data": order,
 	})
 }
+
+func (h *OrderHandler) CancelOrder(c *fiber.Ctx) error {
+	orderID := c.Params("id")
+	if orderID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Order ID wajib diisi",
+		})
+	}
+
+	order, err := h.orderService.CancelOrder(orderID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "Order berhasil dibatalkan",
+		"data":    order,
+	})
+}

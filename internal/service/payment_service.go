@@ -65,6 +65,7 @@ type PaymentService interface {
 	GetOrders() ([]model.Order, error)
 	GetOrderByID(orderID string) (*model.Order, error)
 	GenerateInvoicePDF(orderID string) ([]byte, error)
+	CancelOrder(orderID string) (*model.Order, error)
 }
 
 type paymentService struct {
@@ -142,7 +143,11 @@ func (s *paymentService) CreateCheckoutTransaction(req CreateCheckoutRequest) (*
 	var orderItems []model.OrderItem
 	var midtransItems []midtrans.ItemDetails
 
-	orderID := fmt.Sprintf("ORDER-%d-%s", time.Now().UnixNano(), req.IdempotencyKey[:minInt(8, len(req.IdempotencyKey))])
+	suffix := req.IdempotencyKey
+	if len(suffix) > 16 {
+		suffix = suffix[len(suffix)-16:]
+	}
+	orderID := fmt.Sprintf("ORD-%d-%s", time.Now().UnixMilli(), suffix)
 
 	for _, item := range req.Items {
 		qty := item.Quantity
@@ -631,4 +636,8 @@ func (s *paymentService) GetOrderByID(orderID string) (*model.Order, error) {
 
 func (s *paymentService) GenerateInvoicePDF(orderID string) ([]byte, error) {
 	return s.invoiceService.GenerateInvoicePDF(orderID)
+}
+
+func (s *paymentService) CancelOrder(orderID string) (*model.Order, error) {
+	return s.orderService.CancelOrder(orderID)
 }

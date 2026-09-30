@@ -50,6 +50,7 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	activityHandler := handler.NewActivityHandler(db)
 	customerService := service.NewCustomerService(db)
 	customerHandler := handler.NewCustomerHandler(customerService, db)
+	dashboardHandler := handler.NewDashboardHandler(db)
 	productService := service.NewProductService(db)
 	productHandler := handler.NewProductHandler(productService)
 	categoryService := service.NewCategoryService(db)
@@ -105,7 +106,7 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Put("/customer/profile", customerHandler.UpdateCustomerProfile)
 	api.Post("/customer/profile", customerHandler.UpdateCustomerProfile)
 	api.Get("/admin/customers", customerHandler.GetAdminCustomers)
-	api.Get("/admin/dashboard/stats", customerHandler.GetDashboardStats)
+	api.Get("/admin/dashboard/stats", dashboardHandler.GetDashboardStats)
 
 	// API Activities
 	api.Get("/activities", activityHandler.GetActivities)
@@ -171,6 +172,8 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Post("/payment/notification", paymentHandler.HandleNotification)
 	api.Get("/orders", orderHandler.GetOrders)
 	api.Get("/orders/:id", orderHandler.GetOrderByID)
+	api.Put("/orders/:id/cancel", orderHandler.CancelOrder)
+	api.Post("/orders/:id/cancel", orderHandler.CancelOrder)
 	api.Get("/orders/:id/invoice", invoiceHandler.GetOrderInvoice)
 
 	// Simple Health Check
