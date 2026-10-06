@@ -80,7 +80,7 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 	db.Exec("UPDATE order_items SET title = product_name WHERE (title IS NULL OR title = '') AND product_name IS NOT NULL AND product_name != ''")
 
 	// Jalankan Auto Migrate
-	err = db.AutoMigrate(&model.Admin{}, &model.Customer{}, &model.AppConfig{}, &model.ActivityLog{}, &model.Product{}, &model.Banner{}, &model.Category{}, &model.Order{}, &model.OrderItem{})
+	err = db.AutoMigrate(&model.Admin{}, &model.Customer{}, &model.AppConfig{}, &model.ActivityLog{}, &model.Product{}, &model.Banner{}, &model.Category{}, &model.Order{}, &model.OrderItem{}, &model.BrowsingHistory{})
 	if err != nil {
 		log.Println("Peringatan migrasi gabungan:", err)
 		_ = db.AutoMigrate(&model.Admin{})
@@ -92,6 +92,7 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 		_ = db.AutoMigrate(&model.Category{})
 		_ = db.AutoMigrate(&model.Order{})
 		_ = db.AutoMigrate(&model.OrderItem{})
+		_ = db.AutoMigrate(&model.BrowsingHistory{})
 	}
 
 	log.Println("Migrasi tabel berhasil")
@@ -102,6 +103,7 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 	seedCategories(db)
 	seedProducts(db)
 	seedBanners(db)
+	seedBrowsingHistory(db)
 
 	return db, nil
 }
@@ -694,3 +696,45 @@ func createDBIfNotExists(cfg *config.Config) error {
 	}
 	return nil
 }
+
+func seedBrowsingHistory(db *gorm.DB) {
+	var count int64
+	db.Model(&model.BrowsingHistory{}).Count(&count)
+	if count > 0 {
+		return
+	}
+
+	var products []model.Product
+	db.Limit(12).Find(&products)
+	if len(products) == 0 {
+		return
+	}
+
+	now := time.Now()
+	sampleDates := []time.Time{
+		now,
+		now.Add(-2 * time.Hour),
+		now.AddDate(0, 0, -1),
+		now.AddDate(0, 0, -2),
+		time.Date(2020, 10, 17, 14, 30, 0, 0, time.Local),
+		time.Date(2020, 5, 24, 11, 0, 0, 0, time.Local),
+		time.Date(2020, 9, 21, 16, 45, 0, 0, time.Local),
+		time.Date(2020, 10, 22, 10, 15, 0, 0, time.Local),
+	}
+
+	for i, p := range products {
+		d := sampleDates[i%len(sampleDates)]
+		history := model.BrowsingHistory{
+			UserID:    1,
+			UserEmail: "customer@gmail.com",
+			SessionID: "guest-session",
+			ProductID: p.ID,
+			ViewedAt:  d,
+			CreatedAt: d,
+			UpdatedAt: d,
+		}
+		db.Create(&history)
+	}
+	log.Println("Seed data browsing history berhasil dibuat")
+}
+

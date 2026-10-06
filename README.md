@@ -52,8 +52,10 @@ Microservice ini menangani seluruh proses bisnis kritis pada sistem:
 ```text
 Bot_BE/
 ├── cmd/
-│   └── app/
-│       └── main.go                  # Entrypoint utama server
+│   ├── app/
+│   │   └── main.go                  # Entrypoint utama server
+│   └── seed/
+│       └── main.go                  # Seeding database & dummy catalog
 ├── internal/
 │   ├── config/
 │   │   └── config.go                # Loader .env & variabel sistem
@@ -68,6 +70,7 @@ Bot_BE/
 │   │   ├── customer.go              # Model Customer (Pelanggan)
 │   │   ├── admin.go                 # Model Administrator
 │   │   ├── order.go                 # Model Order & OrderItems
+│   │   ├── browsing_history.go      # Model Riwayat Penelusuran Customer
 │   │   ├── config.go                # Model Konfigurasi Bot
 │   │   ├── activity_log.go          # Model Audit Log Aktivitas
 │   │   └── models.go                # Response DTO Global
@@ -79,6 +82,7 @@ Bot_BE/
 │   │   ├── customer_handler.go      # Controller Auth Login/Register Customer
 │   │   ├── order_handler.go         # Controller Order List, Detail, & Cancel
 │   │   ├── payment_handler.go       # Controller Midtrans Checkout & Notification Callback
+│   │   ├── browsing_history_handler.go # Controller Riwayat Penelusuran
 │   │   ├── message_handler.go       # Controller Webhook WA & Broadcast
 │   │   ├── chat_handler.go          # Controller Live Chat History & Send
 │   │   ├── config_handler.go        # Controller Spreadsheet Config
@@ -89,12 +93,11 @@ Bot_BE/
 │   │   ├── order_service.go         # Logika Bisnis Order & Cancel Stock Restoration
 │   │   ├── payment_service.go       # Logika Bisnis Midtrans & Notification Verification
 │   │   ├── customer_service.go      # Logika Bisnis Customer
+│   │   ├── browsing_history_service.go # Logika Bisnis Riwayat Penelusuran
 │   │   └── bot_service.go           # Logika Bisnis Bot WhatsApp
 │   └── wshub/
 │       └── hub.go                   # WebSocket Connection Hub & Broadcast Event
 ├── data/                            # File Storage (Database)
-├── Dockerfile                       # Multi-Stage Production Dockerfile
-├── docker-compose.yml               # Docker Compose Orchestration
 └── go.mod                           # Go Module Manifest
 ```
 
@@ -178,7 +181,18 @@ type Order struct {
 
 ---
 
-### ⚡ 4. WebSockets Endpoint (`/ws`)
+### 🕒 4. Browsing History API (`/api/browsing-history`)
+
+| Method | Endpoint | Deskripsi |
+| :--- | :--- | :--- |
+| `POST` | `/api/browsing-history` | Mencatat riwayat produk yang dilihat oleh customer |
+| `GET` | `/api/browsing-history` | Mengambil daftar riwayat produk terakhir dilihat (limit & pagination) |
+| `DELETE` | `/api/browsing-history/:id` | Menghapus 1 item riwayat penelusuran |
+| `DELETE` | `/api/browsing-history` | Membersihkan seluruh riwayat penelusuran pengguna |
+
+---
+
+### ⚡ 5. WebSockets Endpoint (`/ws`)
 
 - **URL**: `ws://localhost:8080/ws` (atau `wss://` pada koneksi HTTPS)
 - **Fungsi**: Penyiaran real-time event status pembayaran (`payment_status_updated`), pembatalan pesanan (`order_canceled`), serta update percakapan WhatsApp.

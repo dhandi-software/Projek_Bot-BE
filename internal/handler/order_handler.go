@@ -68,3 +68,33 @@ func (h *OrderHandler) CancelOrder(c *fiber.Ctx) error {
 		"data":    order,
 	})
 }
+
+func (h *OrderHandler) UpdateOrderStatus(c *fiber.Ctx) error {
+	orderID := c.Params("id")
+	if orderID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Order ID wajib diisi",
+		})
+	}
+
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Status == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Status baru wajib diisi dalam body request",
+		})
+	}
+
+	order, err := h.orderService.UpdateOrderStatus(orderID, req.Status)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "Status order berhasil diperbarui",
+		"data":    order,
+	})
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"bot_be/internal/config"
 	"bot_be/internal/handler"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/websocket/v2"
 	"gorm.io/gorm"
@@ -63,12 +65,56 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	orderHandler := handler.NewOrderHandler(orderService)
 	invoiceHandler := handler.NewInvoiceHandler(invoiceService)
 	paymentHandler := handler.NewPaymentHandler(paymentService)
+	browsingHistoryService := service.NewBrowsingHistoryService(db)
+	browsingHistoryHandler := handler.NewBrowsingHistoryHandler(browsingHistoryService)
 
 	// Start WAHA Session automatically
 	provider.StartSession()
 
 	// Routes
 	api := app.Group("/api")
+
+	// Rate Limiting Middleware
+	// 1. General Rate Limiter for all API routes (max 100 requests / minute per IP)
+	apiLimiter := limiter.New(limiter.Config{
+		Max:        100,
+		Expiration: 1 * time.Minute,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP()
+		},
+		Next: func(c *fiber.Ctx) bool {
+			// Skip rate limiting for Webhooks & Health check
+			path := c.Path()
+			if strings.HasPrefix(path, "/api/payment/callback") ||
+				strings.HasPrefix(path, "/api/payment/webhook") ||
+				strings.HasPrefix(path, "/api/payment/notification") ||
+				strings.HasPrefix(path, "/api/wa/webhook") ||
+				path == "/api/health" {
+				return true
+			}
+			return false
+		},
+		LimitReached: func(c *fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error": "Terlalu banyak permintaan (Rate limit exceeded). Silakan tunggu 1 menit lagi.",
+			})
+		},
+	})
+	api.Use(apiLimiter)
+
+	// 2. Strict Rate Limiter for Auth & Checkout routes (max 15 requests / minute per IP)
+	authLimiter := limiter.New(limiter.Config{
+		Max:        15,
+		Expiration: 1 * time.Minute,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP()
+		},
+		LimitReached: func(c *fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error": "Terlalu banyak percobaan akses. Silakan tunggu 1 menit lagi.",
+			})
+		},
+	})
 
 	// Middleware upgrade WebSocket
 	app.Use("/ws", func(c *fiber.Ctx) error {
@@ -95,13 +141,13 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	}))
 
 	// API Auth (Admin & Customer)
-	api.Post("/auth/login", authHandler.Login)
-	api.Post("/login", authHandler.Login)
-	api.Post("/auth/check-email", authHandler.CheckEmail)
-	api.Post("/auth/reset-password", authHandler.ResetPassword)
-	api.Post("/auth/change-password", authHandler.ChangePassword)
-	api.Post("/customer/register", customerHandler.RegisterCustomer)
-	api.Post("/customer/login", customerHandler.LoginCustomer)
+	api.Post("/auth/login", authLimiter, authHandler.Login)
+	api.Post("/login", authLimiter, authHandler.Login)
+	api.Post("/auth/check-email", authLimiter, authHandler.CheckEmail)
+	api.Post("/auth/reset-password", authLimiter, authHandler.ResetPassword)
+	api.Post("/auth/change-password", authLimiter, authHandler.ChangePassword)
+	api.Post("/customer/register", authLimiter, customerHandler.RegisterCustomer)
+	api.Post("/customer/login", authLimiter, customerHandler.LoginCustomer)
 	api.Get("/customer/profile", customerHandler.GetCustomerProfile)
 	api.Put("/customer/profile", customerHandler.UpdateCustomerProfile)
 	api.Post("/customer/profile", customerHandler.UpdateCustomerProfile)
@@ -152,6 +198,12 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Put("/products/:id", productHandler.UpdateProduct)
 	api.Delete("/products/:id", productHandler.DeleteProduct)
 
+	// API Browsing History
+	api.Post("/browsing-history", browsingHistoryHandler.RecordBrowsingHistory)
+	api.Get("/browsing-history", browsingHistoryHandler.GetBrowsingHistory)
+	api.Delete("/browsing-history/:id", browsingHistoryHandler.DeleteBrowsingHistoryItem)
+	api.Delete("/browsing-history", browsingHistoryHandler.ClearBrowsingHistory)
+
 	// API Categories CRUD
 	api.Get("/categories", categoryHandler.GetCategories)
 	api.Post("/categories", categoryHandler.CreateCategory)
@@ -165,13 +217,15 @@ func StartWebServer(cfg *config.Config, db *gorm.DB, sheetsProvider *provider.Sh
 	api.Delete("/banners/:id", bannerHandler.DeleteBanner)
 
 	// API Midtrans Payment, Orders & Invoice
-	api.Post("/payment/checkout", paymentHandler.CreateCheckoutTransaction)
+	api.Post("/payment/checkout", authLimiter, paymentHandler.CreateCheckoutTransaction)
 	api.Post("/payment/callback", paymentHandler.HandleNotification)
 	api.Post("/payment/webhook", paymentHandler.HandleNotification)
 	api.Post("/payment/verify", paymentHandler.HandleNotification)
 	api.Post("/payment/notification", paymentHandler.HandleNotification)
 	api.Get("/orders", orderHandler.GetOrders)
 	api.Get("/orders/:id", orderHandler.GetOrderByID)
+	api.Put("/orders/:id/status", orderHandler.UpdateOrderStatus)
+	api.Post("/orders/:id/status", orderHandler.UpdateOrderStatus)
 	api.Put("/orders/:id/cancel", orderHandler.CancelOrder)
 	api.Post("/orders/:id/cancel", orderHandler.CancelOrder)
 	api.Get("/orders/:id/invoice", invoiceHandler.GetOrderInvoice)

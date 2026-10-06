@@ -19,8 +19,7 @@ func GetWahaURL() string {
 
 // GetWahaAPIKey gets the API key from env
 func GetWahaAPIKey() string {
-	// We'll hardcode it to match docker-compose for now, or read from env
-	return "dhandi_waha_secret" 
+	return os.Getenv("WAHA_API_KEY")
 }
 
 func DoWahaRequest(method, endpoint string, payload []byte) (*http.Response, error) {

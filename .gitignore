@@ -21,6 +21,10 @@ botwa-*-*.json
 
 # Dependencies & Vendors
 /vendor/
+vendor/
+**/vendor/
+node_modules/
+**/node_modules/
 
 # Database & Docker storage
 /data/

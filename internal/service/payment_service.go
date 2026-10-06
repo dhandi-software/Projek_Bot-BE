@@ -547,7 +547,8 @@ func (s *paymentService) HandleNotification(payload map[string]interface{}) erro
 		}
 	}
 
-	if order.Status == "paid" || order.Status == "settlement" {
+	statusLower := strings.ToLower(order.Status)
+	if statusLower == "paid" || statusLower == "settlement" || statusLower == "packaging" || statusLower == "shipped" || statusLower == "on_the_road" || statusLower == "delivered" || statusLower == "completed" {
 		tx.Rollback()
 		log.Printf("[MIDTRANS IDEMPOTENT] order_id %s sudah berstatus '%s'", orderID, order.Status)
 		return nil
@@ -561,11 +562,11 @@ func (s *paymentService) HandleNotification(payload map[string]interface{}) erro
 		if fraudStatus == "challenge" {
 			newStatus = "challenge"
 		} else if fraudStatus == "accept" || fraudStatus == "" {
-			newStatus = "paid"
+			newStatus = "packaging"
 			isPaid = true
 		}
 	case "settlement":
-		newStatus = "paid"
+		newStatus = "packaging"
 		isPaid = true
 	case "cancel", "deny", "expire":
 		newStatus = "failed"
